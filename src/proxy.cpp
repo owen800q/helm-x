@@ -17,11 +17,13 @@
 
 #include "config.h"
 #include "log.h"
+#include "platform.h"
 #include "resources.h"
 #include "rewrite.h"
 #include "tamper.h"
 #include "version.h"
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,12 +35,8 @@
 #include <vector>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
+#include <windows.h>
 #include <winhttp.h>
-#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")
 #endif
@@ -64,6 +62,11 @@ BOOL WINAPI ctrl_handler(DWORD type) {
     }
     return FALSE;
 }
+#else
+// POSIX: stop the accept loop on SIGINT/SIGTERM so the post-loop config
+// restore runs. Only async-signal-safe work here (flip the flag); the actual
+// restore happens after the loop exits.
+void posix_signal_handler(int) { g_running = false; }
 #endif
 
 // ── URL split ──
@@ -403,6 +406,23 @@ bool upstream_post(const std::string& path, const std::string& body,
 
     // path from codex is like "/v1/responses"; prefix is "/v1".
     // Upstream base includes /v1; keep full path as-is (codex paths start /v1).
+#ifndef _WIN32
+    // POSIX: platform HTTP(S) client (TLS via curl).
+    log_info(std::string("upstream: ") + host + ":" + std::to_string(port) + path +
+             " auth=" + (auth.empty() ? "(none)" : auth.substr(0, 20) + "...") +
+             " body=" + std::to_string(body.size()) + "B");
+    HttpClientRequest r;
+    r.host = host;
+    r.port = port;
+    r.path = path;
+    r.tls = (port == 443);
+    r.body = body;
+    r.timeout_sec = 120;
+    r.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0";
+    r.headers.push_back({"Content-Type", "application/json"});
+    if (!auth.empty()) r.headers.push_back({"Authorization", auth});
+    return http_post(r, status, resp);
+#else
     std::wstring whost(host.begin(), host.end());
     std::wstring wpath(path.begin(), path.end());
     std::wstring wauth(auth.begin(), auth.end());
@@ -473,6 +493,7 @@ bool upstream_post(const std::string& path, const std::string& body,
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     return true;
+#endif  // _WIN32
 }
 
 // ── per-connection handling ──
@@ -539,18 +560,7 @@ void handle_client(SOCKET client) {
     // Read config every request (not static) so UI changes take effect without restart
     std::string prompt_mode = "default";
     {
-        std::string config_path;
-#ifdef _WIN32
-        char exe[MAX_PATH] = {0};
-        DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-        if (n > 0 && n < MAX_PATH) {
-            std::string exe_dir = std::string(exe);
-            size_t last_slash = exe_dir.find_last_of("\\/");
-            if (last_slash != std::string::npos) {
-                config_path = exe_dir.substr(0, last_slash + 1) + "helmx.config.json";
-            }
-        }
-#endif
+        std::string config_path = exe_relative("helmx.config.json");
         if (!config_path.empty()) {
             std::ifstream f(config_path);
             if (f) {
@@ -968,6 +978,11 @@ int proxy_main(int argc, char** argv) {
 
 #ifdef _WIN32
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
+#else
+    std::signal(SIGINT, posix_signal_handler);
+    std::signal(SIGTERM, posix_signal_handler);
+    // don't die when a client socket is closed mid-write
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
 
     // auto-config: point codex at this proxy
@@ -989,7 +1004,7 @@ int proxy_main(int argc, char** argv) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((u_short)g_listen_port);
+    addr.sin_port = htons((unsigned short)g_listen_port);
     if (::bind(listen_sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
         std::fprintf(stderr, "[helm-x] bind :%d failed\n", g_listen_port);
         return 1;
@@ -1007,7 +1022,7 @@ int proxy_main(int argc, char** argv) {
         FD_ZERO(&rfds);
         FD_SET(listen_sock, &rfds);
         timeval tv{1, 0};
-        int sel = ::select(0, &rfds, nullptr, nullptr, &tv);
+        int sel = ::select((int)listen_sock + 1, &rfds, nullptr, nullptr, &tv);
         if (sel > 0) {
             SOCKET client = ::accept(listen_sock, nullptr, nullptr);
             if (client != INVALID_SOCKET) {

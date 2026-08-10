@@ -1,0 +1,115 @@
+name: Release
+
+# Build helm-x for macOS, Linux and Windows, then publish a GitHub Release
+# with the binaries attached. Fires on a version tag push (v*), or manually
+# via the Actions tab (workflow_dispatch).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.0.5)'
+        required: true
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: helmx-macos-universal
+          - os: ubuntu-latest
+            asset: helmx-linux-x86_64
+          - os: windows-latest
+            asset: helmx-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Note: we deliberately do NOT run tools/embed.py here. The committed
+      # src/resources_generated.cpp already bakes in every embedded resource
+      # (including rewriter_builtin.json, which is kept out of git);
+      # regenerating in CI would strip it. Build the committed file as-is.
+
+      - name: Configure
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # universal binary: runs on both Apple Silicon and Intel Macs
+            cmake -B build -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          else
+            cmake -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp build/Release/helmx.exe "dist/${{ matrix.asset }}"
+          else
+            cp build/helmx "dist/${{ matrix.asset }}"
+            chmod +x "dist/${{ matrix.asset }}"
+          fi
+
+      - name: Show binary info
+        run: |
+          ls -la dist
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            file "dist/${{ matrix.asset }}" || true
+            otool -L "dist/${{ matrix.asset }}" || true
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            file "dist/${{ matrix.asset }}" || true
+            ldd "dist/${{ matrix.asset }}" || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/helmx-macos-universal
+            artifacts/helmx-linux-x86_64
+            artifacts/helmx-windows-x86_64.exe
+            artifacts/SHA256SUMS.txt

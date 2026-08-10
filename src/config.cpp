@@ -25,7 +25,9 @@ std::string find_codex_home() {
     if (env && *env && fs::exists(fs::path(env) / "config.toml")) {
         return env;
     }
+    // USERPROFILE on Windows; HOME on macOS/Linux.
     const char* user = std::getenv("USERPROFILE");
+    if (!user || !*user) user = std::getenv("HOME");
     if (user && *user) {
         fs::path home(user);
         for (const char* sub : {".codex", "codex"}) {

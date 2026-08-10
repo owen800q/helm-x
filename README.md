@@ -27,7 +27,7 @@ helm-x 是 Codex CLI 的本地映射层：`codex → 127.0.0.1:1800 → 上游�
 2. **TAMPER 篡改**：拒绝响应被检测到时改写为合规标记（支持 SSE 流式 + 自动重试）
 3. **上下文感知改写器**：cyber flag 触发时自动改写请求（读取对话历史 + 重试机制）
 4. **内置免费改写 API**：开箱即用，无需额外配置
-5. **零依赖**：单 exe 静态链接，仅 Windows 系统库
+5. **零依赖**：单文件二进制，仅依赖系统库（Windows / macOS / Linux 三平台）
 
 ---
 
@@ -175,11 +175,44 @@ assets/
 
 ## 构建
 
+支持 Windows、macOS、Linux 三平台，均为零外部依赖的单文件二进制。
+
+**Windows** (MinGW)：
+
 ```bat
-python tools/embed.py
-cmake -B build -G "MinGW Makefiles"
-cmake --build build
+build.bat
 ```
+
+**macOS / Linux**：
+
+```bash
+./build.sh
+```
+
+产物：`build/helmx`（Windows 为 `build/helmx.exe`）。
+
+> macOS / Linux 通过系统 `curl` 完成上游 HTTPS 请求（TLS 由系统处理，无需链接
+> OpenSSL 等库）；`curl` 在 macOS 与主流 Linux 发行版中默认预装。
+
+手动构建：
+
+```bash
+python3 tools/embed.py            # 生成嵌入资源（缺少私有资源时可跳过）
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+macOS 通用二进制（同时支持 Apple Silicon 与 Intel）：
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake --build build -j
+```
+
+### 发布
+
+推送 `v*` 标签（如 `v0.0.5`）即触发 `.github/workflows/release.yml`，
+自动为 macOS / Linux / Windows 构建二进制并创建 GitHub Release。
 
 ---
 

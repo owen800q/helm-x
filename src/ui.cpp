@@ -4,6 +4,7 @@
 #include "config.h"
 #include "http.h"
 #include "log.h"
+#include "platform.h"
 #include "resources.h"
 #include "rewrite.h"
 #include "tamper.h"
@@ -21,10 +22,7 @@
 #include <thread>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
@@ -195,7 +193,6 @@ static HttpResponse api_cyber_log(const HttpRequest&) {
 static HttpResponse api_proxy_status(const HttpRequest&) {
     // local mapping status: is proxy listening? what's the relay?
     bool listening = false;
-#ifdef _WIN32
     // check if something listens on 127.0.0.1:1800
     SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s != INVALID_SOCKET) {
@@ -206,7 +203,6 @@ static HttpResponse api_proxy_status(const HttpRequest&) {
         if (::connect(s, (sockaddr*)&a, sizeof(a)) == 0) listening = true;
         ::closesocket(s);
     }
-#endif
     std::string home = find_codex_home();
     std::string relay = !home.empty() ? read_relay_url(home) : "";
     std::string cfg_base;
@@ -285,6 +281,10 @@ static HttpResponse api_restart(const HttpRequest&) {
             }
         }
     }
+#else
+    // POSIX: spawn a detached child that waits for us to exit, then re-execs.
+    helmx::restart_self();
+    log_info("ui: restart helper launched");
 #endif
 
     // Schedule exit after response is sent
@@ -348,21 +348,7 @@ static HttpResponse api_rewriter_save(const HttpRequest& req) {
     }
 
     // Find helmx.config.json path
-    std::string config_path;
-#ifdef _WIN32
-    char exe[MAX_PATH] = {0};
-    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::string exe_dir = std::string(exe);
-        size_t last_slash = exe_dir.find_last_of("\\/");
-        if (last_slash != std::string::npos) {
-            config_path = exe_dir.substr(0, last_slash + 1) + "helmx.config.json";
-        }
-    }
-#endif
-    if (config_path.empty()) {
-        config_path = "helmx.config.json";
-    }
+    std::string config_path = exe_relative("helmx.config.json");
 
     // Build JSON from request body
     std::string json = "{\n  \"rewriter\": {\n";
@@ -433,21 +419,7 @@ static HttpResponse api_rewriter_toggle(const HttpRequest& req) {
     cfg.enabled = enable;
 
     // Save back
-    std::string config_path;
-#ifdef _WIN32
-    char exe[MAX_PATH] = {0};
-    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::string exe_dir = std::string(exe);
-        size_t last_slash = exe_dir.find_last_of("\\/");
-        if (last_slash != std::string::npos) {
-            config_path = exe_dir.substr(0, last_slash + 1) + "helmx.config.json";
-        }
-    }
-#endif
-    if (config_path.empty()) {
-        config_path = "helmx.config.json";
-    }
+    std::string config_path = exe_relative("helmx.config.json");
 
     // Read existing config
     std::ifstream in(config_path);
@@ -482,19 +454,7 @@ static HttpResponse api_rewriter_toggle(const HttpRequest& req) {
 
 static HttpResponse api_prompt_mode_get(const HttpRequest&) {
     // Get current prompt mode from config
-    std::string config_path;
-#ifdef _WIN32
-    char exe[MAX_PATH] = {0};
-    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::string exe_dir = std::string(exe);
-        size_t last_slash = exe_dir.find_last_of("\\/");
-        if (last_slash != std::string::npos) {
-            config_path = exe_dir.substr(0, last_slash + 1) + "helmx.config.json";
-        }
-    }
-#endif
-    if (config_path.empty()) config_path = "helmx.config.json";
+    std::string config_path = exe_relative("helmx.config.json");
 
     std::string mode = "default";
     std::ifstream in(config_path);
@@ -529,19 +489,7 @@ static HttpResponse api_prompt_mode(const HttpRequest& req) {
     }
 
     // Find config path
-    std::string config_path;
-#ifdef _WIN32
-    char exe[MAX_PATH] = {0};
-    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::string exe_dir = std::string(exe);
-        size_t last_slash = exe_dir.find_last_of("\\/");
-        if (last_slash != std::string::npos) {
-            config_path = exe_dir.substr(0, last_slash + 1) + "helmx.config.json";
-        }
-    }
-#endif
-    if (config_path.empty()) config_path = "helmx.config.json";
+    std::string config_path = exe_relative("helmx.config.json");
 
     // Read existing config
     std::ifstream in(config_path);
