@@ -214,17 +214,19 @@ cmake --build build -j
 推送 `v*` 标签（如 `v0.0.5`）即触发 `.github/workflows/release.yml`，
 自动为 macOS / Linux / Windows 构建二进制并创建 GitHub Release。
 
-### 上游自动同步
+### 上游自动同步（Claude Routine）
 
-`.github/workflows/upstream-sync.yml` 每日（及手动）检查本仓库是否落后于其
-上游（fork 来源，自动探测）。若落后，则将默认分支同步到上游，并调用 Claude
-（`anthropics/claude-code-action`）把新引入的 Windows 专用代码移植到
-`src/platform` 跨平台层，自动提交 PR。
+上游同步由一个 **Claude 定时任务（Routine）** 负责，而非 GitHub Action，
+因此无需在仓库中配置任何密钥。该任务每日运行一次：
 
-- 需配置仓库 Secret `ANTHROPIC_API_KEY`（或 Claude Code OAuth token）；未配置时
-  改为自动开 issue 提醒。
-- 定时触发仅在**默认分支**上的工作流生效——需先将该文件合并到 `master`。
-- 可选变量 `UPSTREAM_REPO` / `UPSTREAM_BRANCH` 覆盖自动探测的上游。
+1. 对比本 fork 的 `master` 与上游 `ADWMC/helm-x` 的 `master`；
+2. 若落后，则将 `master` 快进/合并同步到上游并推送；
+3. 审查新合入的提交，若引入了 Windows 专用代码，则按 `src/platform`
+   跨平台层的既有模式移植到 macOS/Linux，本地编译验证后推送移植分支
+   `claude/upstream-port-*`，并在完成通知中附上一键新建 PR 的链接。
+
+任务在 Claude 账户下运行，结果通过推送通知反馈。可在 claude.ai 的
+Routines 界面调整频率或停用。
 
 ---
 
