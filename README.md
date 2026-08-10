@@ -214,6 +214,18 @@ cmake --build build -j
 推送 `v*` 标签（如 `v0.0.5`）即触发 `.github/workflows/release.yml`，
 自动为 macOS / Linux / Windows 构建二进制并创建 GitHub Release。
 
+### 上游自动同步
+
+`.github/workflows/upstream-sync.yml` 每日（及手动）检查本仓库是否落后于其
+上游（fork 来源，自动探测）。若落后，则将默认分支同步到上游，并调用 Claude
+（`anthropics/claude-code-action`）把新引入的 Windows 专用代码移植到
+`src/platform` 跨平台层，自动提交 PR。
+
+- 需配置仓库 Secret `ANTHROPIC_API_KEY`（或 Claude Code OAuth token）；未配置时
+  改为自动开 issue 提醒。
+- 定时触发仅在**默认分支**上的工作流生效——需先将该文件合并到 `master`。
+- 可选变量 `UPSTREAM_REPO` / `UPSTREAM_BRANCH` 覆盖自动探测的上游。
+
 ---
 
 ## 参考项目
