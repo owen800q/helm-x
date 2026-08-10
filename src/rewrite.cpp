@@ -2,6 +2,7 @@
 #include "rewrite.h"
 
 #include "log.h"
+#include "platform.h"
 #include "resources.h"
 #include "version.h"
 
@@ -14,9 +15,6 @@
 #include <string>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
 #include <windows.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
@@ -28,15 +26,11 @@ namespace helmx {
 
 // find config: exe dir / helmx.config.json, then ./helmx.config.json
 static std::string find_config_path() {
-#ifdef _WIN32
-    char exe[MAX_PATH] = {0};
-    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        fs::path exe_dir = fs::path(exe).parent_path();
-        fs::path p1 = exe_dir / "helmx.config.json";
+    std::string dir = executable_dir();
+    if (!dir.empty()) {
+        fs::path p1 = fs::path(dir) / "helmx.config.json";
         if (fs::exists(p1)) return p1.string();
     }
-#endif
     fs::path p2 = fs::path(".") / "helmx.config.json";
     if (fs::exists(p2)) return p2.string();
     return "";
@@ -363,6 +357,7 @@ bool rewrite_via_api(const RewriterConfig& cfg, const std::string& user_msg,
                        "\"max_tokens\":3000,"
                        "\"temperature\":0.2}";
 
+    std::string resp;
 #ifdef _WIN32
     std::wstring whost(host.begin(), host.end());
     std::wstring wpath(path.begin(), path.end());
@@ -406,7 +401,6 @@ bool rewrite_via_api(const RewriterConfig& cfg, const std::string& user_msg,
         return false;
     }
 
-    std::string resp;
     char buf[65536];
     DWORD avail = 0;
     while (WinHttpQueryDataAvailable(hRequest, &avail) && avail > 0) {
@@ -418,6 +412,25 @@ bool rewrite_via_api(const RewriterConfig& cfg, const std::string& user_msg,
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
+#else
+    // POSIX: platform HTTP(S) client (TLS via curl).
+    HttpClientRequest r;
+    r.host = host;
+    r.port = port;
+    r.path = path;
+    r.tls = (port == 443);
+    r.body = body;
+    r.timeout_sec = cfg.timeout_sec > 0 ? cfg.timeout_sec : 60;
+    r.user_agent = "helmx-rewriter/" HELMX_VERSION;
+    r.headers.push_back({"Content-Type", "application/json"});
+    r.headers.push_back({"Authorization", "Bearer " + cfg.api_key});
+    if (cfg.use_proxy && !cfg.proxy_url.empty()) r.proxy_url = cfg.proxy_url;
+    int status = 0;
+    if (!http_post(r, status, resp)) {
+        log_error("rewriter: request failed");
+        return false;
+    }
+#endif
 
     // extract choices[0].message.content (mimo reasoning models put the
     // final answer in reasoning_content when content is empty)
@@ -439,10 +452,6 @@ bool rewrite_via_api(const RewriterConfig& cfg, const std::string& user_msg,
     out = content;
     log_info(std::string("rewriter: ") + std::to_string(user_msg.size()) + "B -> " + std::to_string(out.size()) + "B");
     return true;
-#else
-    (void)host; (void)port; (void)path;
-    return false;
-#endif
 }
 
 }  // namespace helmx

@@ -1,7 +1,8 @@
-// http.cpp — minimal HTTP/1.1 server (WinSock2, zero external deps)
+// http.cpp — minimal HTTP/1.1 server (BSD sockets, zero external deps)
 #include "http.h"
 
 #include "log.h"
+#include "platform.h"
 
 #include <cstdio>
 #include <cstring>
@@ -9,11 +10,6 @@
 #include <sstream>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
@@ -230,7 +226,7 @@ int run_http_server(int port, HttpHandler handler) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((u_short)port);
+    addr.sin_port = htons((unsigned short)port);
     if (::bind(listen_sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
         std::fprintf(stderr, "[helm-x] bind 127.0.0.1:%d failed\n", port);
         ::closesocket(listen_sock);

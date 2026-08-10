@@ -1,0 +1,82 @@
+name: Build
+
+# Compile helm-x on every push and pull request so breakage is caught early.
+# Builds macOS, Linux and Windows and uploads each binary as a run artifact.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos
+            runs-on: macos-latest
+            asset: helmx-macos-universal
+          - target: linux
+            runs-on: ubuntu-latest
+            asset: helmx-linux-x86_64
+          - target: windows
+            runs-on: ubuntu-latest
+            asset: helmx-windows-x86_64.exe
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The committed src/resources_generated.cpp already bakes in every
+      # embedded resource (including the out-of-git rewriter builtin), so we
+      # build it as-is rather than regenerating with tools/embed.py.
+
+      - name: Install MinGW toolchain
+        if: matrix.target == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Configure
+        run: |
+          case "${{ matrix.target }}" in
+            macos)
+              cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
+            windows)
+              # cross-compile a static Windows binary with the project's
+              # native toolchain (MinGW), matching build.bat.
+              cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=Windows \
+                -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+                -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+                -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres ;;
+            *)
+              cmake -B build -DCMAKE_BUILD_TYPE=Release ;;
+          esac
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            cp build/helmx.exe "dist/${{ matrix.asset }}"
+          else
+            cp build/helmx "dist/${{ matrix.asset }}"
+            chmod +x "dist/${{ matrix.asset }}"
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error

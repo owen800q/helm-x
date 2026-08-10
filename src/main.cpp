@@ -5,18 +5,12 @@
 #include <chrono>
 #include <string>
 #include <thread>
-
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <shellapi.h>
-#endif
+#include <vector>
 
 #include "config.h"
 #include "log.h"
 #include "mcp.h"
+#include "platform.h"
 #include "proxy.h"
 #include "resources.h"
 #include "ui.h"
@@ -37,7 +31,11 @@ static void launch_dashboard() {
     std::printf("  helm-x  —  Proxy + Web Console\n");
     std::printf("  Proxy   : http://127.0.0.1:1800\n");
     std::printf("  UI      : http://127.0.0.1:%d\n", port);
+#ifdef _WIN32
     std::printf("  Log     : %%USERPROFILE%%\\.codex\\helmx.log\n");
+#else
+    std::printf("  Log     : ~/.codex/helmx.log\n");
+#endif
     std::printf("  Close this window to stop all services.\n");
     std::printf("==============================================\n");
     std::fflush(stdout);
@@ -56,9 +54,7 @@ static void launch_dashboard() {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // Open browser
-#ifdef _WIN32
-    ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#endif
+    helmx::open_url(url);
 
     // Run proxy in main thread (blocks until shutdown)
     std::vector<std::string> proxy_args = {"helmx", "proxy", "--listen", "1800"};

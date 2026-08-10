@@ -1,0 +1,119 @@
+name: Release
+
+# Build helm-x for macOS, Linux and Windows, then publish a GitHub Release
+# with the binaries attached. Fires on a version tag push (v*), or manually
+# via the Actions tab (workflow_dispatch).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.0.5)'
+        required: true
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos
+            runs-on: macos-latest
+            asset: helmx-macos-universal
+          - target: linux
+            runs-on: ubuntu-latest
+            asset: helmx-linux-x86_64
+          - target: windows
+            runs-on: ubuntu-latest
+            asset: helmx-windows-x86_64.exe
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The committed src/resources_generated.cpp already bakes in every
+      # embedded resource (including rewriter_builtin.json, which is kept out
+      # of git); regenerating in CI would strip it. Build the committed file.
+
+      - name: Install MinGW toolchain
+        if: matrix.target == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Configure
+        run: |
+          case "${{ matrix.target }}" in
+            macos)
+              # universal binary: runs on both Apple Silicon and Intel Macs
+              cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
+            windows)
+              # cross-compile a static Windows binary with MinGW (matches build.bat)
+              cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=Windows \
+                -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+                -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+                -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres ;;
+            *)
+              cmake -B build -DCMAKE_BUILD_TYPE=Release ;;
+          esac
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            cp build/helmx.exe "dist/${{ matrix.asset }}"
+          else
+            cp build/helmx "dist/${{ matrix.asset }}"
+            chmod +x "dist/${{ matrix.asset }}"
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/helmx-macos-universal
+            artifacts/helmx-linux-x86_64
+            artifacts/helmx-windows-x86_64.exe
+            artifacts/SHA256SUMS.txt
