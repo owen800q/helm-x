@@ -1,0 +1,66 @@
+name: Build
+
+# Compile helm-x on every push and pull request so breakage is caught early.
+# Builds macOS, Linux and Windows and uploads each binary as a run artifact.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: helmx-macos-universal
+          - os: ubuntu-latest
+            asset: helmx-linux-x86_64
+          - os: windows-latest
+            asset: helmx-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The committed src/resources_generated.cpp already bakes in every
+      # embedded resource (including the out-of-git rewriter builtin), so we
+      # build it as-is rather than regenerating with tools/embed.py.
+
+      - name: Configure
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cmake -B build -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          else
+            cmake -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp build/Release/helmx.exe "dist/${{ matrix.asset }}"
+          else
+            cp build/helmx "dist/${{ matrix.asset }}"
+            chmod +x "dist/${{ matrix.asset }}"
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
