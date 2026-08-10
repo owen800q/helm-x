@@ -450,7 +450,8 @@ bool upstream_post(const std::string& path, const std::string& body,
     log_info(std::string("upstream: ") + host + ":" + std::to_string(port) + path +
              " auth=" + (auth.empty() ? "(none)" : auth.substr(0, 20) + "...") +
              " body=" + std::to_string(body.size()) + "B");
-    hdrs += L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0\r\n";
+    hdrs += L"User-Agent: codex_exec/0.146.0 (Windows 10.0.26100; x86_64) xterm-256color (codex_exec; 0.146.0)\r\n";
+    hdrs += L"Originator: codex_exec\r\n";
 
     BOOL ok = WinHttpSendRequest(hRequest, hdrs.c_str(), (DWORD)hdrs.size(),
                                  (LPVOID)body.data(), (DWORD)body.size(),
@@ -1043,6 +1044,10 @@ int proxy_main(int argc, char** argv) {
     WSACleanup();
 #endif
     return 0;
+}
+
+std::string get_relay_url() {
+    return g_upstream;
 }
 
 }  // namespace helmx
