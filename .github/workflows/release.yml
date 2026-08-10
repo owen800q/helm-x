@@ -27,55 +27,59 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - target: macos
+            runs-on: macos-latest
             asset: helmx-macos-universal
-          - os: ubuntu-latest
+          - target: linux
+            runs-on: ubuntu-latest
             asset: helmx-linux-x86_64
-          - os: windows-latest
+          - target: windows
+            runs-on: ubuntu-latest
             asset: helmx-windows-x86_64.exe
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
 
-      # Note: we deliberately do NOT run tools/embed.py here. The committed
-      # src/resources_generated.cpp already bakes in every embedded resource
-      # (including rewriter_builtin.json, which is kept out of git);
-      # regenerating in CI would strip it. Build the committed file as-is.
+      # The committed src/resources_generated.cpp already bakes in every
+      # embedded resource (including rewriter_builtin.json, which is kept out
+      # of git); regenerating in CI would strip it. Build the committed file.
+
+      - name: Install MinGW toolchain
+        if: matrix.target == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
       - name: Configure
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # universal binary: runs on both Apple Silicon and Intel Macs
-            cmake -B build -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-          else
-            cmake -B build -DCMAKE_BUILD_TYPE=Release
-          fi
+          case "${{ matrix.target }}" in
+            macos)
+              # universal binary: runs on both Apple Silicon and Intel Macs
+              cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
+            windows)
+              # cross-compile a static Windows binary with MinGW (matches build.bat)
+              cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=Windows \
+                -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+                -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+                -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres ;;
+            *)
+              cmake -B build -DCMAKE_BUILD_TYPE=Release ;;
+          esac
 
       - name: Build
-        run: cmake --build build --config Release -j
+        run: cmake --build build -j
 
       - name: Package
         run: |
           mkdir -p dist
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp build/Release/helmx.exe "dist/${{ matrix.asset }}"
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            cp build/helmx.exe "dist/${{ matrix.asset }}"
           else
             cp build/helmx "dist/${{ matrix.asset }}"
             chmod +x "dist/${{ matrix.asset }}"
           fi
-
-      - name: Show binary info
-        run: |
           ls -la dist
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            file "dist/${{ matrix.asset }}" || true
-            otool -L "dist/${{ matrix.asset }}" || true
-          elif [ "$RUNNER_OS" = "Linux" ]; then
-            file "dist/${{ matrix.asset }}" || true
-            ldd "dist/${{ matrix.asset }}" || true
-          fi
 
       - uses: actions/upload-artifact@v4
         with:
