@@ -507,7 +507,7 @@ static HttpResponse api_prompt_mode(const HttpRequest& req) {
     // Update or add prompt_mode field
     size_t p = content.find("\"prompt_mode\"");
     if (p != std::string::npos) {
-        // Update existing
+        // Update existing string value in place
         size_t colon = content.find(':', p);
         if (colon != std::string::npos) {
             size_t start = colon + 1;
@@ -521,28 +521,33 @@ static HttpResponse api_prompt_mode(const HttpRequest& req) {
             }
         }
     } else {
-        // Add new field before the last }
-        size_t last_brace = content.rfind('}');
-        if (last_brace != std::string::npos) {
-            std::string insert = "  \"prompt_mode\": \"" + mode + "\"\n";
-            // Check if there's a comma needed
-            size_t prev_line = content.rfind('\n', last_brace - 1);
-            if (prev_line != std::string::npos) {
-                size_t non_space = content.find_first_not_of(" \t\r\n", prev_line + 1);
-                if (non_space != std::string::npos && content[non_space] != '}' && content[non_space] != ',') {
-                    insert = ",\n" + insert;
-                }
-            }
-            content.insert(last_brace, insert);
+        // No prompt_mode field yet. Insert one right after the opening brace so
+        // we never depend on the trailing-brace layout (which previously broke
+        // when the file was missing/empty or ended with a nested "}\n}").
+        size_t open = content.find('{');
+        size_t close = content.rfind('}');
+        std::string field = "\"prompt_mode\": \"" + mode + "\"";
+        if (open == std::string::npos || close == std::string::npos || close <= open) {
+            // Empty or absent config file — create a fresh object.
+            content = "{\n  " + field + "\n}\n";
+        } else {
+            // Does the object already contain any members?
+            std::string inner = content.substr(open + 1, close - open - 1);
+            bool has_members = inner.find_first_not_of(" \t\r\n") != std::string::npos;
+            // Insert as the first member; add a separating comma only when
+            // other members follow, keeping the JSON valid in both cases.
+            std::string insert = "\n  " + field + (has_members ? ",\n" : "\n");
+            content.insert(open + 1, insert);
         }
     }
 
     // Write back
     std::ofstream out(config_path);
-    if (out) {
-        out << content;
-        out.close();
+    if (!out) {
+        return HttpResponse::json("{\"error\":\"failed to write config\"}");
     }
+    out << content;
+    out.close();
 
     log_info("ui: prompt mode changed to " + mode);
     return HttpResponse::json("{\"ok\":true,\"mode\":\"" + mode + "\"}");
