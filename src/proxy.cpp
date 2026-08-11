@@ -49,6 +49,21 @@ std::string g_upstream;  // e.g. https://huablog.xyz/v1
 int g_listen_port = 1800;
 bool g_running = true;
 
+// Read a positive integer from an environment variable, else default.
+int env_int(const char* name, int fallback) {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return fallback;
+    long n = std::strtol(v, nullptr, 10);
+    return n > 0 ? (int)n : fallback;
+}
+
+// Upstream transfer budget. gpt-5.x at high reasoning effort over a large
+// context can stream for several minutes; the old fixed 120s cap truncated
+// the SSE mid-stream and codex never saw response.completed. Ceiling is an
+// absolute safety limit; idle is the real stall detector (see http_post).
+int upstream_timeout_sec() { return env_int("HELMX_UPSTREAM_TIMEOUT", 900); }
+int upstream_idle_sec()    { return env_int("HELMX_UPSTREAM_IDLE", 120); }
+
 #ifdef _WIN32
 BOOL WINAPI ctrl_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_CLOSE_EVENT || type == CTRL_BREAK_EVENT) {
@@ -417,7 +432,8 @@ bool upstream_post(const std::string& path, const std::string& body,
     r.path = path;
     r.tls = (port == 443);
     r.body = body;
-    r.timeout_sec = 120;
+    r.timeout_sec = upstream_timeout_sec();
+    r.idle_timeout_sec = upstream_idle_sec();
     r.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0";
     r.headers.push_back({"Content-Type", "application/json"});
     if (!auth.empty()) r.headers.push_back({"Authorization", auth});
@@ -431,6 +447,16 @@ bool upstream_post(const std::string& path, const std::string& body,
                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
+
+    // Streaming upstreams keep the connection open for minutes; WinHTTP's
+    // default 30s receive timeout would cut the SSE stream. Resolve/connect
+    // stay short; send/receive get the idle window (per-operation) bounded by
+    // the absolute ceiling.
+    {
+        int idle_ms = upstream_idle_sec() * 1000;
+        int ceil_ms = upstream_timeout_sec() * 1000;
+        WinHttpSetTimeouts(hSession, 30000, 30000, ceil_ms, idle_ms);
+    }
 
     HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), (INTERNET_PORT)port, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }

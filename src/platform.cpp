@@ -165,6 +165,14 @@ bool http_post(const HttpClientRequest& req, int& status, std::string& resp) {
     cfg += "request = \"POST\"\n";
     cfg += "url = \"" + curl_cfg_escape(url) + "\"\n";
     cfg += "max-time = \"" + std::to_string(req.timeout_sec > 0 ? req.timeout_sec : 60) + "\"\n";
+    // Idle-based abort: with a streaming (SSE) upstream a fixed max-time cuts
+    // the connection mid-stream even while tokens are still flowing, so codex
+    // never sees response.completed. Instead abort only on a genuine stall —
+    // throughput under 1 B/s sustained for idle_timeout_sec.
+    if (req.idle_timeout_sec > 0) {
+        cfg += "speed-limit = \"1\"\n";
+        cfg += "speed-time = \"" + std::to_string(req.idle_timeout_sec) + "\"\n";
+    }
     if (!req.user_agent.empty())
         cfg += "user-agent = \"" + curl_cfg_escape(req.user_agent) + "\"\n";
     if (!req.proxy_url.empty())

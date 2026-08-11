@@ -69,7 +69,11 @@ struct HttpClientRequest {
     std::string body;
     std::string user_agent;
     std::string proxy_url;  // optional "http://host:port"; empty = direct
-    int timeout_sec = 60;
+    int timeout_sec = 60;       // absolute ceiling for the whole transfer
+    int idle_timeout_sec = 0;   // >0: abort only after this many seconds of
+                                // no throughput (a real stall), so a slow but
+                                // still-streaming SSE response is not cut off
+                                // at a fixed wall while tokens keep arriving.
 };
 
 // Performs a POST. On transport success returns true and fills status +
