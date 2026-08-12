@@ -70,21 +70,99 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
+      # Sign the macOS binary so it is not rejected on launch.
+      #
+      # Two modes, picked automatically:
+      #   * Developer ID  — when the MACOS_CERT_P12 secret is configured. This
+      #     is the only signature Gatekeeper accepts on a *quarantined* file
+      #     (i.e. one downloaded with a browser), and it is what lets the
+      #     notarize step below run.
+      #   * ad-hoc        — the default when no certificate is configured.
+      #     Required for arm64 slices to execute at all, and it keeps the
+      #     universal binary from being reported as "damaged"; it does NOT by
+      #     itself satisfy Gatekeeper on a quarantined download. The .tar.gz
+      #     packaging below is what removes the xattr step in that case.
+      - name: Sign macOS binary
+        if: matrix.target == 'macos'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MACOS_CERT_P12:-}" ]; then
+            echo "Developer ID certificate present — signing for distribution."
+            KEYCHAIN="$RUNNER_TEMP/helmx-signing.keychain-db"
+            KEYCHAIN_PASSWORD="$(uuidgen)"
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+              -P "${MACOS_CERT_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+            security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+            rm -f "$RUNNER_TEMP/cert.p12"
+
+            # Hardened runtime + secure timestamp are prerequisites for notarization.
+            codesign --force --timestamp --options runtime \
+              --sign "${MACOS_SIGN_IDENTITY:?MACOS_SIGN_IDENTITY must be set alongside MACOS_CERT_P12}" \
+              build/helmx
+          else
+            echo "No Developer ID certificate configured — applying an ad-hoc signature."
+            codesign --force --sign - build/helmx
+          fi
+          codesign --verify --verbose=2 build/helmx
+          codesign --display --verbose=2 build/helmx
+
+      # Notarization is what teaches Gatekeeper to trust the binary even when
+      # it carries the quarantine flag. Only possible with a Developer ID
+      # signature, so this is a no-op until the notary secrets are configured.
+      # Note: a ticket cannot be stapled onto a bare Mach-O executable (only
+      # onto .app/.dmg/.pkg), so Gatekeeper verifies it online on first run.
+      - name: Notarize macOS binary
+        if: matrix.target == 'macos'
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MACOS_NOTARY_APPLE_ID:-}" ]; then
+            echo "No notary credentials configured — skipping notarization."
+            exit 0
+          fi
+          ditto -c -k --keepParent build/helmx "$RUNNER_TEMP/helmx-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/helmx-notarize.zip" \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" \
+            --wait
+
       - name: Package
         run: |
-          mkdir -p dist
+          set -euo pipefail
+          mkdir -p dist pkg
           if [ "${{ matrix.target }}" = "windows" ]; then
             cp build/helmx.exe "dist/${{ matrix.asset }}"
           else
             cp build/helmx "dist/${{ matrix.asset }}"
             chmod +x "dist/${{ matrix.asset }}"
+            # Also ship a tarball. macOS only propagates com.apple.quarantine
+            # into archives expanded by Finder/Archive Utility — a tarball
+            # unpacked with `tar -xzf` yields an unquarantined binary, so the
+            # user never has to run `xattr -d com.apple.quarantine` by hand.
+            cp build/helmx pkg/helmx
+            chmod +x pkg/helmx
+            tar -czf "dist/${{ matrix.asset }}.tar.gz" -C pkg helmx
           fi
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}*
           if-no-files-found: error
 
   release:
@@ -111,9 +189,43 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
+          body: |
+            ## 安装 / Install
+
+            **macOS**（推荐，无需手动 `xattr`）:
+
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/helmx-macos-universal.tar.gz | tar -xzf -
+            ./helmx
+            ```
+
+            或一键安装 / or one-line install:
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/master/install.sh | bash
+            ```
+
+            > 用 `curl` 下载、用 `tar` 解压的文件不会被打上 `com.apple.quarantine`
+            > 标记，因此不需要手动执行 `xattr -d com.apple.quarantine`。
+            > 若通过浏览器直接下载裸二进制文件，仍会被 Gatekeeper 拦截 —
+            > 请改用上面的 `.tar.gz` 或安装脚本。
+
+            **Linux**:
+
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/helmx-linux-x86_64.tar.gz | tar -xzf -
+            ./helmx
+            ```
+
+            **Windows**: 下载 `helmx-windows-x86_64.exe` 双击运行。
+
+            ---
+
           fail_on_unmatched_files: true
           files: |
             artifacts/helmx-macos-universal
+            artifacts/helmx-macos-universal.tar.gz
             artifacts/helmx-linux-x86_64
+            artifacts/helmx-linux-x86_64.tar.gz
             artifacts/helmx-windows-x86_64.exe
             artifacts/SHA256SUMS.txt

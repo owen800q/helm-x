@@ -64,6 +64,16 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
+      # Ad-hoc signature: arm64 slices will not execute without one, and it
+      # keeps the universal binary from being reported as "damaged". Release
+      # builds additionally use a Developer ID certificate when configured —
+      # see .github/workflows/release.yml.
+      - name: Ad-hoc sign macOS binary
+        if: matrix.target == 'macos'
+        run: |
+          codesign --force --sign - build/helmx
+          codesign --verify --verbose=2 build/helmx
+
       - name: Stage binary
         run: |
           mkdir -p dist

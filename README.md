@@ -86,6 +86,45 @@ codex ──> http://127.0.0.1:1800 ──> 上游中转
 
 ---
 
+## 下载安装
+
+从 [Releases](https://github.com/owen800q/helm-x/releases/latest) 获取预编译二进制。
+
+**macOS**（一键安装，推荐）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/owen800q/helm-x/master/install.sh | bash
+```
+
+或手动下载 `.tar.gz` 解压：
+
+```bash
+curl -fsSL https://github.com/owen800q/helm-x/releases/latest/download/helmx-macos-universal.tar.gz | tar -xzf -
+./helmx
+```
+
+> **关于 `xattr -d com.apple.quarantine`**
+>
+> `com.apple.quarantine` 是**浏览器**在下载时打上的标记，不是二进制本身的属性。
+> 用 `curl` 下载、用 `tar` 解压的文件不会被打标记，因此上面两种方式都**无需**
+> 手动执行 `xattr`。
+>
+> 发布流程会对 macOS 二进制签名：仓库配置了 Developer ID 证书时使用正式签名并
+> 送 Apple 公证（notarization），否则回退为 ad-hoc 签名（Apple Silicon 上运行
+> 所必需）。ad-hoc 签名不足以让 Gatekeeper 放行**被隔离标记**的文件，所以若你
+> 用浏览器直接点击下载裸二进制文件，仍会被拦截 —— 请改用上面的 `.tar.gz` 或
+> 安装脚本。
+
+**Linux**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/owen800q/helm-x/master/install.sh | bash
+```
+
+**Windows**：下载 `helmx-windows-x86_64.exe`，双击运行。
+
+---
+
 ## 使用教程
 
 ### 一、准备上游中转
@@ -208,7 +247,31 @@ cmake --build build -j
 ### 发布
 
 推送 `v*` 标签（如 `v0.0.5`）即触发 `.github/workflows/release.yml`，
-自动为 macOS / Linux / Windows 构建二进制并创建 GitHub Release。
+自动为 macOS / Linux / Windows 构建二进制并创建 GitHub Release，
+同时附带 `.tar.gz` 包与 `SHA256SUMS.txt`。
+
+#### macOS 签名与公证（可选）
+
+macOS 产物默认使用 **ad-hoc 签名**，无需任何密钥即可工作。若要让浏览器直接
+下载的裸二进制文件也能通过 Gatekeeper，需要配置 Apple Developer ID，在仓库
+Settings → Secrets and variables → Actions 中添加：
+
+| Secret | 说明 |
+|--------|------|
+| `MACOS_CERT_P12` | Developer ID Application 证书（`.p12`）的 base64 编码 |
+| `MACOS_CERT_PASSWORD` | 该 `.p12` 的导出密码 |
+| `MACOS_SIGN_IDENTITY` | 签名标识，如 `Developer ID Application: Your Name (TEAMID)` |
+| `MACOS_NOTARY_APPLE_ID` | 用于公证的 Apple ID |
+| `MACOS_NOTARY_TEAM_ID` | 开发者团队 ID |
+| `MACOS_NOTARY_PASSWORD` | App-specific password |
+
+生成 `MACOS_CERT_P12`：
+
+```bash
+base64 -i DeveloperID.p12 | pbcopy
+```
+
+未配置时签名步骤自动回退到 ad-hoc，公证步骤直接跳过，发布流程不会失败。
 
 ### 上游自动同步（Claude Routine）
 

@@ -105,6 +105,35 @@ helmx.exe (single binary)
 | Upstream relay | Any OpenAI-compatible API (base_url in codex config) |
 | Runtime | None (only KERNEL32/UCRT/WS2_32/SHELL32/WINHTTP) |
 
+### Download
+
+**macOS / Linux** — one-line install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/owen800q/helm-x/master/install.sh | bash
+```
+
+Or grab the tarball directly:
+
+```bash
+curl -fsSL https://github.com/owen800q/helm-x/releases/latest/download/helmx-macos-universal.tar.gz | tar -xzf -
+./helmx
+```
+
+> **No `xattr -d com.apple.quarantine` needed.** The quarantine flag is applied
+> by the *browser* at download time, not baked into the binary. Files fetched
+> with `curl` and unpacked with `tar` are never flagged, so both commands above
+> just work.
+>
+> Release builds sign the macOS binary: with a Developer ID certificate plus
+> Apple notarization when the repo has those secrets configured, otherwise an
+> ad-hoc signature (required for Apple Silicon to execute it at all). An ad-hoc
+> signature is not enough for Gatekeeper to admit a *quarantined* file, so if
+> you download the bare binary through a browser it will still be blocked —
+> use the `.tar.gz` or the installer instead.
+
+**Windows** — download `helmx-windows-x86_64.exe` and double-click.
+
 ### Install
 
 ```bat
