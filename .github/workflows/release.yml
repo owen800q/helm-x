@@ -102,7 +102,10 @@ jobs:
               -P "${MACOS_CERT_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/security
             security set-key-partition-list -S apple-tool:,apple:,codesign: \
               -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-            security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+            # Prepend our keychain to the search list, keeping the existing
+            # entries so nothing else on the runner breaks.
+            security list-keychains -d user -s "$KEYCHAIN" \
+              $(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
             rm -f "$RUNNER_TEMP/cert.p12"
 
             # Hardened runtime + secure timestamp are prerequisites for notarization.
