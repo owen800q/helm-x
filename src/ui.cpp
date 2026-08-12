@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -84,6 +85,34 @@ static std::string json_escape(const std::string& s) {
         }
     }
     return out;
+}
+
+static bool json_value(const std::string& json, const char* key, std::string& value) {
+    size_t p = json.find("\"" + std::string(key) + "\"");
+    if (p == std::string::npos) return false;
+    p = json.find(':', p + std::strlen(key) + 2);
+    if (p == std::string::npos) return false;
+    p = json.find_first_not_of(" \t\r\n", p + 1);
+    if (p == std::string::npos) return false;
+    if (json[p] != '"') {
+        size_t end = json.find_first_of(",}\r\n", p);
+        value = json.substr(p, end == std::string::npos ? end : end - p);
+        size_t last = value.find_last_not_of(" \t");
+        if (last != std::string::npos) value.resize(last + 1);
+        return true;
+    }
+    value.clear();
+    for (++p; p < json.size(); ++p) {
+        if (json[p] == '"') return true;
+        if (json[p] == '\\' && p + 1 < json.size()) {
+            char escaped = json[++p];
+            value += escaped == 'n' ? '\n' : escaped == 'r' ? '\r' :
+                     escaped == 't' ? '\t' : escaped;
+        } else {
+            value += json[p];
+        }
+    }
+    return false;
 }
 
 // ── API handlers ──
@@ -208,27 +237,16 @@ static HttpResponse api_proxy_status(const HttpRequest&) {
     // Prefer proxy's runtime relay URL (always correct), fallback to config file
     std::string relay = get_relay_url();
     if (relay.empty() && !home.empty()) relay = read_relay_url(home);
+    std::string provider;
     std::string cfg_base;
-    if (!home.empty()) {
-        std::ifstream f(fs::path(home) / "config.toml");
-        if (f) {
-            std::stringstream ss;
-            ss << f.rdbuf();
-            std::string c = ss.str();
-            size_t p = c.find("base_url");
-            if (p != std::string::npos) {
-                size_t q1 = c.find('"', p);
-                size_t q2 = q1 == std::string::npos ? std::string::npos : c.find('"', q1 + 1);
-                if (q2 != std::string::npos) cfg_base = c.substr(q1 + 1, q2 - q1 - 1);
-            }
-        }
-    }
+    if (!home.empty()) read_active_provider(home, provider, cfg_base);
     // proxied = config points at local proxy
     bool proxied = cfg_base.find("127.0.0.1:1800") != std::string::npos;
     std::string body =
         "{\"running\":" + std::string(listening ? "true" : "false") +
         ",\"proxied\":" + std::string(proxied ? "true" : "false") +
         ",\"relay\":\"" + json_escape(relay) + "\"" +
+        ",\"provider\":\"" + json_escape(provider) + "\"" +
         ",\"cfg_base\":\"" + json_escape(cfg_base) + "\"" +
         "}";
     return HttpResponse::json(body);
@@ -248,6 +266,7 @@ static HttpResponse api_proxy_restore(const HttpRequest&) {
 static HttpResponse api_restart(const HttpRequest&) {
     log_info("ui: restart requested — scheduling restart via batch script");
 
+    bool launched = false;
 #ifdef _WIN32
     char exe[MAX_PATH] = {0};
     DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
@@ -279,6 +298,7 @@ static HttpResponse api_restart(const HttpRequest&) {
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
                 log_info("ui: restart batch script launched");
+                launched = true;
             } else {
                 log_info("ui: failed to launch restart script");
             }
@@ -289,6 +309,11 @@ static HttpResponse api_restart(const HttpRequest&) {
     helmx::restart_self();
     log_info("ui: restart helper launched");
 #endif
+
+    if (!launched) {
+        log_error("ui: restart failed");
+        return HttpResponse::json("{\"ok\":false,\"error\":\"failed to launch restart\"}", 500);
+    }
 
     // Schedule exit after response is sent
     std::thread([] {
@@ -305,7 +330,8 @@ static HttpResponse api_rewriter(const HttpRequest&) {
     bool loaded = load_rewriter_config(cfg);
     std::string key_hint;
     if (loaded && !cfg.api_key.empty()) {
-        key_hint = cfg.api_key.substr(0, 6) + "..." + cfg.api_key.substr(cfg.api_key.size() - 4);
+        key_hint = cfg.api_key.size() <= 10 ? "configured" :
+                   cfg.api_key.substr(0, 6) + "..." + cfg.api_key.substr(cfg.api_key.size() - 4);
     }
     std::string body =
         std::string("{\"loaded\":") + (loaded ? "true" : "false") +
@@ -314,6 +340,9 @@ static HttpResponse api_rewriter(const HttpRequest&) {
         ",\"provider\":\"" + json_escape(cfg.provider) + "\"" +
         ",\"key\":\"" + json_escape(key_hint) + "\"" +
         ",\"base_url\":\"" + json_escape(cfg.base_url) + "\"" +
+        ",\"proxy_url\":\"" + json_escape(cfg.proxy_url) + "\"" +
+        ",\"timeout_sec\":" + std::to_string(cfg.timeout_sec) +
+        ",\"use_proxy\":" + (cfg.use_proxy ? "true" : "false") +
         "}";
     return HttpResponse::json(body);
 }
@@ -343,143 +372,50 @@ static HttpResponse api_rewriter_test(const HttpRequest& req) {
 }
 
 static HttpResponse api_rewriter_save(const HttpRequest& req) {
-    // Save rewriter config from JSON body
-    // Expected: {"enabled":true,"provider":"nvidia","model":"...","api_key":"...","base_url":"...","proxy_url":"...","timeout_sec":60,"use_proxy":false}
-    std::string body = req.body;
-    if (body.empty()) {
-        return HttpResponse::json("{\"error\":\"empty body\"}");
-    }
-
-    // Find helmx.config.json path
-    std::string config_path = exe_relative("helmx.config.json");
-
-    // Build JSON from request body
-    std::string json = "{\n  \"rewriter\": {\n";
-
-    // Extract fields from request body (simple parsing)
-    auto extract = [&body](const std::string& key) -> std::string {
-        size_t p = body.find("\"" + key + "\"");
-        if (p == std::string::npos) return "";
-        p = body.find(':', p);
-        if (p == std::string::npos) return "";
-        p++;
-        while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) p++;
-        if (p < body.size() && body[p] == '"') {
-            p++;
-            size_t end = body.find('"', p);
-            if (end != std::string::npos) return body.substr(p, end - p);
-        } else {
-            size_t end = p;
-            while (end < body.size() && body[end] != ',' && body[end] != '}') end++;
-            return body.substr(p, end - p);
+    if (req.body.empty()) return HttpResponse::json("{\"error\":\"empty body\"}", 400);
+    RewriterConfig cfg;
+    load_rewriter_config(cfg);
+    std::string value;
+    if (json_value(req.body, "enabled", value)) cfg.enabled = value == "true";
+    if (json_value(req.body, "provider", value) && !value.empty()) cfg.provider = value;
+    if (json_value(req.body, "model", value) && !value.empty()) cfg.model = value;
+    if (json_value(req.body, "base_url", value) && !value.empty()) cfg.base_url = value;
+    if (json_value(req.body, "api_key", value) && !value.empty()) cfg.api_key = value;
+    if (json_value(req.body, "proxy_url", value)) cfg.proxy_url = value;
+    if (json_value(req.body, "use_proxy", value)) cfg.use_proxy = value == "true";
+    if (json_value(req.body, "timeout_sec", value)) {
+        try { cfg.timeout_sec = std::stoi(value); } catch (...) {
+            return HttpResponse::json("{\"error\":\"invalid timeout\"}", 400);
         }
-        return "";
-    };
-
-    std::string enabled = extract("enabled");
-    std::string provider = extract("provider");
-    std::string model = extract("model");
-    std::string api_key = extract("api_key");
-    std::string base_url = extract("base_url");
-    std::string proxy_url = extract("proxy_url");
-    std::string timeout_sec = extract("timeout_sec");
-    std::string use_proxy = extract("use_proxy");
-
-    json += "    \"enabled\": " + (enabled.empty() ? "false" : enabled) + ",\n";
-    json += "    \"provider\": \"" + (provider.empty() ? "nvidia" : provider) + "\",\n";
-    json += "    \"base_url\": \"" + (base_url.empty() ? "https://integrate.api.nvidia.com/v1" : base_url) + "\",\n";
-    json += "    \"api_key\": \"" + (api_key.empty() ? "" : api_key) + "\",\n";
-    json += "    \"model\": \"" + (model.empty() ? "meta/llama-3.1-8b-instruct" : model) + "\",\n";
-    json += "    \"timeout_sec\": " + (timeout_sec.empty() ? "60" : timeout_sec) + ",\n";
-    json += "    \"use_proxy\": " + (use_proxy.empty() ? "false" : use_proxy);
-    if (!proxy_url.empty()) {
-        json += ",\n    \"proxy_url\": \"" + proxy_url + "\"";
     }
-    json += "\n  }\n}\n";
-
-    // Write to file
-    std::ofstream f(config_path);
-    if (!f) {
-        return HttpResponse::json("{\"error\":\"failed to write config\"}");
-    }
-    f << json;
-    f.close();
-
-    log_info("ui: rewriter config saved to " + config_path);
-    return HttpResponse::json("{\"ok\":true,\"path\":\"" + json_escape(config_path) + "\"}");
+    if (cfg.timeout_sec < 1 || cfg.timeout_sec > 600)
+        return HttpResponse::json("{\"error\":\"timeout must be 1-600\"}", 400);
+    std::string path;
+    if (!save_rewriter_config(cfg, path))
+        return HttpResponse::json("{\"error\":\"failed to write config\"}", 500);
+    log_info("ui: rewriter config saved to " + path);
+    return HttpResponse::json("{\"ok\":true,\"path\":\"" + json_escape(path) + "\"}");
 }
 
 static HttpResponse api_rewriter_toggle(const HttpRequest& req) {
-    // Toggle rewriter enabled/disabled
-    // Body: "true" or "false"
-    bool enable = (req.body == "true");
-
-    // Load current config
+    if (req.body != "true" && req.body != "false")
+        return HttpResponse::json("{\"error\":\"expected true or false\"}", 400);
+    bool enable = req.body == "true";
     RewriterConfig cfg;
     load_rewriter_config(cfg);
-
-    // Update enabled state
     cfg.enabled = enable;
-
-    // Save back
-    std::string config_path = exe_relative("helmx.config.json");
-
-    // Read existing config
-    std::ifstream in(config_path);
-    std::string content;
-    if (in) {
-        std::stringstream ss;
-        ss << in.rdbuf();
-        content = ss.str();
-        in.close();
-    }
-
-    // Update enabled field
-    size_t p = content.find("\"enabled\":");
-    if (p != std::string::npos) {
-        size_t start = p + 10;
-        while (start < content.size() && (content[start] == ' ' || content[start] == '\t')) start++;
-        size_t end = start;
-        while (end < content.size() && content[end] != ',' && content[end] != '}') end++;
-        content.replace(start, end - start, enable ? "true" : "false");
-    }
-
-    // Write back
-    std::ofstream out(config_path);
-    if (out) {
-        out << content;
-        out.close();
-    }
+    std::string path;
+    if (!save_rewriter_config(cfg, path))
+        return HttpResponse::json("{\"error\":\"failed to write config\"}", 500);
 
     log_info(std::string("ui: rewriter ") + (enable ? "enabled" : "disabled"));
     return HttpResponse::json(std::string("{\"ok\":true,\"enabled\":") + (enable ? "true" : "false") + "}");
 }
 
 static HttpResponse api_prompt_mode_get(const HttpRequest&) {
-    // Get current prompt mode from config
-    std::string config_path = exe_relative("helmx.config.json");
-
-    std::string mode = "default";
-    std::ifstream in(config_path);
-    if (in) {
-        std::stringstream ss;
-        ss << in.rdbuf();
-        std::string content = ss.str();
-        size_t p = content.find("\"prompt_mode\"");
-        if (p != std::string::npos) {
-            p = content.find(':', p);
-            if (p != std::string::npos) {
-                p++;
-                while (p < content.size() && (content[p] == ' ' || content[p] == '\t')) p++;
-                if (p < content.size() && content[p] == '"') {
-                    p++;
-                    size_t end = content.find('"', p);
-                    if (end != std::string::npos) mode = content.substr(p, end - p);
-                }
-            }
-        }
-    }
-
+    RewriterConfig cfg;
+    load_rewriter_config(cfg);
+    const std::string& mode = cfg.prompt_mode;
     std::string desc = (mode == "v45") ? "gpt-5.6-instruct (沙盒执行器)" : "helm-x (安全研究竞赛)";
     return HttpResponse::json("{\"mode\":\"" + mode + "\",\"desc\":\"" + desc + "\"}");
 }
@@ -491,63 +427,12 @@ static HttpResponse api_prompt_mode(const HttpRequest& req) {
         return HttpResponse::json("{\"error\":\"invalid mode, use 'default' or 'v45'\"}");
     }
 
-    // Find config path
-    std::string config_path = exe_relative("helmx.config.json");
-
-    // Read existing config
-    std::ifstream in(config_path);
-    std::string content;
-    if (in) {
-        std::stringstream ss;
-        ss << in.rdbuf();
-        content = ss.str();
-        in.close();
-    }
-
-    // Update or add prompt_mode field
-    size_t p = content.find("\"prompt_mode\"");
-    if (p != std::string::npos) {
-        // Update existing string value in place
-        size_t colon = content.find(':', p);
-        if (colon != std::string::npos) {
-            size_t start = colon + 1;
-            while (start < content.size() && (content[start] == ' ' || content[start] == '\t')) start++;
-            if (start < content.size() && content[start] == '"') {
-                start++;
-                size_t end = content.find('"', start);
-                if (end != std::string::npos) {
-                    content.replace(start, end - start, mode);
-                }
-            }
-        }
-    } else {
-        // No prompt_mode field yet. Insert one right after the opening brace so
-        // we never depend on the trailing-brace layout (which previously broke
-        // when the file was missing/empty or ended with a nested "}\n}").
-        size_t open = content.find('{');
-        size_t close = content.rfind('}');
-        std::string field = "\"prompt_mode\": \"" + mode + "\"";
-        if (open == std::string::npos || close == std::string::npos || close <= open) {
-            // Empty or absent config file — create a fresh object.
-            content = "{\n  " + field + "\n}\n";
-        } else {
-            // Does the object already contain any members?
-            std::string inner = content.substr(open + 1, close - open - 1);
-            bool has_members = inner.find_first_not_of(" \t\r\n") != std::string::npos;
-            // Insert as the first member; add a separating comma only when
-            // other members follow, keeping the JSON valid in both cases.
-            std::string insert = "\n  " + field + (has_members ? ",\n" : "\n");
-            content.insert(open + 1, insert);
-        }
-    }
-
-    // Write back
-    std::ofstream out(config_path);
-    if (!out) {
-        return HttpResponse::json("{\"error\":\"failed to write config\"}");
-    }
-    out << content;
-    out.close();
+    RewriterConfig cfg;
+    load_rewriter_config(cfg);
+    cfg.prompt_mode = mode;
+    std::string path;
+    if (!save_rewriter_config(cfg, path))
+        return HttpResponse::json("{\"error\":\"failed to write config\"}", 500);
 
     log_info("ui: prompt mode changed to " + mode);
     return HttpResponse::json("{\"ok\":true,\"mode\":\"" + mode + "\"}");

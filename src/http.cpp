@@ -5,6 +5,7 @@
 #include "platform.h"
 
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -140,7 +141,14 @@ static void handle_conn(SOCKET client, HttpHandler& handler) {
     std::string body = rest;
     auto it = headers.find("content-length");
     if (it != headers.end()) {
-        size_t need = (size_t)std::strtoul(it->second.c_str(), nullptr, 10);
+        char* end = nullptr;
+        unsigned long parsed = std::strtoul(it->second.c_str(), &end, 10);
+        while (end && *end && std::isspace((unsigned char)*end)) ++end;
+        if (!end || end == it->second.c_str() || *end != '\0' || parsed > 16 * 1024 * 1024) {
+            ::closesocket(client);
+            return;
+        }
+        size_t need = (size_t)parsed;
         while (body.size() < need) {
             int n = ::recv(client, buf, sizeof(buf), 0);
             if (n <= 0) break;

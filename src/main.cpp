@@ -1,5 +1,6 @@
 // helm-x — Codex CLI environment control tool (C++17, single binary)
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -9,7 +10,6 @@
 
 #include "config.h"
 #include "log.h"
-#include "mcp.h"
 #include "platform.h"
 #include "proxy.h"
 #include "resources.h"
@@ -50,11 +50,37 @@ static void launch_dashboard() {
     });
     ui_thread.detach();
 
-    // Small delay so UI server is up
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // Wait until the UI is accepting connections before opening the browser.
+    // The loopback probe itself is portable via the platform.h socket shims;
+    // only WinSock's explicit startup/teardown is Windows-specific.
+#ifdef _WIN32
+    WSADATA wsa{};
+    bool ui_ready = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+#else
+    bool ui_ready = true;
+#endif
+    if (ui_ready) {
+        ui_ready = false;
+        for (int attempt = 0; attempt < 50 && !ui_ready; ++attempt) {
+            SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (s != INVALID_SOCKET) {
+                sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                addr.sin_port = htons((uint16_t)port);
+                ui_ready = ::connect(s, (sockaddr*)&addr, sizeof(addr)) == 0;
+                ::closesocket(s);
+            }
+            if (!ui_ready) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+#ifdef _WIN32
+        WSACleanup();
+#endif
+    }
 
     // Open browser
-    helmx::open_url(url);
+    if (ui_ready) helmx::open_url(url);
+    else std::fprintf(stderr, "[helm-x] UI failed to start at %s\n", url.c_str());
 
     // Run proxy in main thread (blocks until shutdown)
     std::vector<std::string> proxy_args = {"helmx", "proxy", "--listen", "1800"};
@@ -76,7 +102,6 @@ static void usage() {
         "  ui                 web dashboard (status / rules / actions)\n"
         "  watch              self-healing daemon (verify + restore)\n"
         "  proxy              tamper proxy (HTTP MITM inject + rewrite)\n"
-        "  mcp                built-in MCP server (stdio JSON-RPC)\n"
         "  remove             uninstall and restore backups\n"
         "\n");
 }
@@ -103,8 +128,6 @@ int main(int argc, char** argv) {
         return helmx::watch(argc > 2 ? std::atoi(argv[2]) : 60);
     } else if (cmd == "proxy") {
         return helmx::proxy_main(argc, argv);
-    } else if (cmd == "mcp") {
-        return helmx::mcp_main();
     } else if (cmd == "remove") {
         return helmx::remove();
     } else if (cmd == "help" || cmd == "-h" || cmd == "--help") {

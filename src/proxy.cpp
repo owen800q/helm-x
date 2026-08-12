@@ -28,6 +28,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <atomic>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -47,7 +49,7 @@ namespace {
 
 std::string g_upstream;  // e.g. https://huablog.xyz/v1
 int g_listen_port = 1800;
-bool g_running = true;
+std::atomic<bool> g_running{true};
 
 // Read a positive integer from an environment variable, else default.
 int env_int(const char* name, int fallback) {
@@ -509,6 +511,11 @@ bool upstream_post(const std::string& path, const std::string& body,
         DWORD read = 0;
         if (WinHttpReadData(hRequest, buf, avail < sizeof(buf) ? avail : sizeof(buf), &read) && read > 0) {
             resp.append(buf, read);
+            if (resp.size() > 16 * 1024 * 1024) {
+                log_error("upstream: response exceeds 16 MiB limit");
+                resp.clear();
+                break;
+            }
         } else {
             break;
         }
@@ -560,11 +567,28 @@ void handle_client(SOCKET client) {
         for (auto& c : k) c = (char)std::tolower((unsigned char)c);
         if (k == "authorization") auth = v;
         else if (k == "content-type") content_type = v;
-        else if (k == "content-length") content_length = (size_t)std::strtoul(v.c_str(), nullptr, 10);
+        else if (k == "content-length") {
+            char* end = nullptr;
+            unsigned long long parsed = std::strtoull(v.c_str(), &end, 10);
+            while (end && *end && std::isspace((unsigned char)*end)) ++end;
+            if (!end || end == v.c_str() || *end != '\0' || parsed > 16 * 1024 * 1024) {
+                std::string response = "HTTP/1.1 400 Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                ::send(client, response.data(), (int)response.size(), 0);
+                ::closesocket(client);
+                return;
+            }
+            content_length = (size_t)parsed;
+        }
     }
 
     // read body
     std::string body = rest;
+    if (content_length > 16 * 1024 * 1024) {
+        std::string response = "HTTP/1.1 413 Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        ::send(client, response.data(), (int)response.size(), 0);
+        ::closesocket(client);
+        return;
+    }
     while (body.size() < content_length) {
         int n = ::recv(client, buf, sizeof(buf), 0);
         if (n <= 0) break;
@@ -572,42 +596,15 @@ void handle_client(SOCKET client) {
     }
     if (body.size() > content_length) body = body.substr(0, content_length);
 
-    // rewriter config (lazy load once)
-    static RewriterConfig rcfg;
-    static bool rcfg_loaded = false;
-    if (!rcfg_loaded) {
-        rcfg_loaded = true;
-        load_rewriter_config(rcfg);
-    }
+    // Load on each request so UI edits take effect without restarting proxy.
+    RewriterConfig rcfg;
+    load_rewriter_config(rcfg);
 
     // inject AGENTS into request (from encrypted resource, not from file)
-    // Prompt selection: "v45" uses gpt-5.6-instruct prompt, default uses helm-x prompt
-    // Read config every request (not static) so UI changes take effect without restart
-    std::string prompt_mode = "default";
-    {
-        std::string config_path = exe_relative("helmx.config.json");
-        if (!config_path.empty()) {
-            std::ifstream f(config_path);
-            if (f) {
-                std::stringstream ss;
-                ss << f.rdbuf();
-                std::string content = ss.str();
-                size_t p = content.find("\"prompt_mode\"");
-                if (p != std::string::npos) {
-                    p = content.find(':', p);
-                    if (p != std::string::npos) {
-                        p++;
-                        while (p < content.size() && (content[p] == ' ' || content[p] == '\t')) p++;
-                        if (p < content.size() && content[p] == '\"') {
-                            p++;
-                            size_t end = content.find('"', p);
-                            if (end != std::string::npos) prompt_mode = content.substr(p, end - p);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Prompt mode comes from the same configuration as the rewriter. The
+    // loader caches on mtime, so re-reading per request stays cheap while UI
+    // edits still take effect without a restart.
+    const std::string& prompt_mode = rcfg.prompt_mode;
 
     std::string agents;
     if (prompt_mode == "v45") {
@@ -1013,7 +1010,10 @@ int proxy_main(int argc, char** argv) {
     // auto-config: point codex at this proxy
     std::string home = find_codex_home();
     if (!home.empty()) {
-        inject_config_proxy(home, g_listen_port);
+        if (!inject_config_proxy(home, g_listen_port)) {
+            std::fprintf(stderr, "[helm-x] failed to update codex config\n");
+            return 1;
+        }
         log_info("proxy: auto-config codex base_url -> http://127.0.0.1:" + std::to_string(g_listen_port) + "/v1");
         std::printf("[helm-x] codex config -> http://127.0.0.1:%d/v1\n", g_listen_port);
     }
@@ -1041,7 +1041,7 @@ int proxy_main(int argc, char** argv) {
     std::fflush(stdout);
     log_info("proxy: listening :" + std::to_string(g_listen_port) + " -> " + g_upstream);
 
-    while (g_running) {
+    while (g_running.load()) {
         // accept with timeout so Ctrl+C can break the loop
         fd_set rfds;
         FD_ZERO(&rfds);
