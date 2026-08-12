@@ -66,6 +66,14 @@ static std::string json_field(const std::string& s, const std::string& field) {
 }
 
 bool load_rewriter_config(RewriterConfig& cfg) {
+    // Cached — only loads once, subsequent calls return cached result
+    static RewriterConfig cached;
+    static bool loaded_once = false;
+    if (loaded_once) {
+        cfg = cached;
+        return cfg.enabled || !cfg.model.empty();
+    }
+
     std::string path = find_config_path();
     std::string content;
 
@@ -144,6 +152,8 @@ bool load_rewriter_config(RewriterConfig& cfg) {
              " model=" + cfg.model +
              " proxy=" + (cfg.use_proxy ? cfg.proxy_url : "direct") +
              " key=" + (cfg.api_key.empty() ? "(none)" : cfg.api_key.substr(0, 8) + "..."));
+    cached = cfg;
+    loaded_once = true;
     return true;
 }
 
