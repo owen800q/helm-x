@@ -18,6 +18,13 @@
 #endif
 #include <windows.h>
 #pragma comment(lib, "advapi32.lib")
+#else
+#include <cerrno>
+#include <csignal>
+#include <ctime>
+#include <sys/select.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -112,18 +119,92 @@ bool run_capture(const std::string& cmd, std::string& out, int timeout_sec = 120
     CloseHandle(read_pipe);
     return true;
 #else
-    (void)cmd; (void)out; (void)timeout_sec;
-    return false;
+    // POSIX: run the command via /bin/sh, capturing stdout+stderr through a
+    // pipe. Abort (SIGKILL) if it runs past the deadline so the UI never hangs.
+    out.clear();
+
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) return false;
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        return false;
+    }
+    if (pid == 0) {
+        // child: redirect stdout+stderr into the pipe, then exec the shell.
+        ::dup2(pipefd[1], STDOUT_FILENO);
+        ::dup2(pipefd[1], STDERR_FILENO);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        ::execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr);
+        _exit(127);  // exec failed
+    }
+
+    // parent
+    ::close(pipefd[1]);
+
+    time_t deadline = ::time(nullptr) + (timeout_sec > 0 ? timeout_sec : 0);
+    bool killed = false;
+    char buf[4096];
+    for (;;) {
+        time_t now = ::time(nullptr);
+        long remaining = timeout_sec > 0 ? (long)(deadline - now) : 3600;
+        if (timeout_sec > 0 && remaining <= 0) {
+            ::kill(pid, SIGKILL);
+            killed = true;
+            break;
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(pipefd[0], &rfds);
+        struct timeval tv;
+        tv.tv_sec = remaining;
+        tv.tv_usec = 0;
+
+        int rc = ::select(pipefd[0] + 1, &rfds, nullptr, nullptr, &tv);
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (rc == 0) {
+            // select timed out — deadline reached.
+            ::kill(pid, SIGKILL);
+            killed = true;
+            break;
+        }
+
+        ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
+        if (n > 0) {
+            out.append(buf, (size_t)n);
+            continue;
+        }
+        if (n == 0) break;  // child closed stdout (EOF)
+        if (errno == EINTR) continue;
+        break;
+    }
+
+    ::close(pipefd[0]);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    (void)killed;
+    return true;
 #endif
 }
 
 }  // namespace
 
 // Shared: run `codex exec --skip-git-repo-check helmx` and capture output.
-// codex on Windows is a .cmd shim (npm); CreateProcess cannot run it
-// directly, so route through cmd /c.
 bool codex_exec_capture(std::string& out, int timeout_sec) {
+#ifdef _WIN32
+    // codex on Windows is a .cmd shim (npm); CreateProcess cannot run it
+    // directly, so route through cmd /c.
     std::string cmd = "cmd /c \"codex exec --skip-git-repo-check helmx 2>&1\"";
+#else
+    std::string cmd = "codex exec --skip-git-repo-check helmx 2>&1";
+#endif
     return run_capture(cmd, out, timeout_sec);
 }
 
@@ -180,7 +261,11 @@ int run_verify(bool e2e, std::string& report) {
         );
         if (!spawned) {
             std::string wout;
+#ifdef _WIN32
             run_capture("cmd /c \"where codex 2>&1\"", wout, 15);
+#else
+            run_capture("command -v codex 2>&1", wout, 15);
+#endif
             report += "  [....] where codex -> " + wout + "\n";
         }
         check(activated, "e2e: codex activation (helmx)",
