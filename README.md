@@ -8,7 +8,7 @@
 
 **如果这个项目对你有帮助，请给个 Star 支持一下！**
 
-**QQ 交流群**：213266664
+**Telegram**：[t.me/helm_xD](https://t.me/helm_xD)
 
 ---
 
