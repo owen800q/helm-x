@@ -3,11 +3,13 @@
 #include "obf.h"
 #include "resources.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 #ifdef _WIN32
@@ -168,8 +170,8 @@ static bool read_top_level_string_assignment(const std::string& content, const c
     return false;
 }
 
-static bool provider_base_url(const std::string& content, const std::string& provider,
-                              std::string& value) {
+static bool provider_string_field(const std::string& content, const std::string& provider,
+                                  const char* key, std::string& value) {
     const std::string header = "[model_providers." + provider + "]";
     std::istringstream lines(content);
     std::string line;
@@ -186,9 +188,14 @@ static bool provider_base_url(const std::string& content, const std::string& pro
                            line[first + header.size()] == '#');
             continue;
         }
-        if (in_provider && read_string_assignment(line, "base_url", value)) return true;
+        if (in_provider && read_string_assignment(line, key, value)) return true;
     }
     return false;
+}
+
+static bool provider_base_url(const std::string& content, const std::string& provider,
+                              std::string& value) {
+    return provider_string_field(content, provider, "base_url", value);
 }
 
 static bool active_provider(const std::string& content, std::string& provider) {
@@ -482,6 +489,178 @@ bool read_active_provider(const std::string& home, std::string& provider,
     const std::string content = ss.str();
     return active_provider(content, provider) &&
            provider_base_url(content, provider, base_url);
+}
+
+// ── upstream credential resolution ──
+//
+// Up to codex 0.148.x a custom model provider inherited the ambient credential
+// from auth.json, so codex sent `Authorization: Bearer <token>` even when the
+// provider table declared no key of its own. codex 0.149.0 stopped doing that
+// (custom providers no longer inherit ambient auth headers): unless the
+// provider itself resolves a bearer token, the request goes out with no
+// Authorization header at all. Requests then reach the relay unauthenticated
+// and it answers 401 {"error":"Missing API key"}.
+//
+// The proxy sits between codex and the relay, so it can resolve the very same
+// credential codex used to send and attach it. Order mirrors codex's own
+// lookup, then adds the two sources codex 0.149 dropped:
+//   1. [model_providers.X].env_key           -> environment variable
+//   2. [model_providers.X].experimental_bearer_token
+//   3. [model_providers.X].api_key           -> helm-x's documented key field
+//                                               (codex ignores this one)
+//   4. auth.json OPENAI_API_KEY              (codex login --with-api-key)
+//   5. auth.json tokens.access_token         (codex login, ChatGPT account)
+
+// Read a JSON string field. Returns false for absent, null and non-string
+// values, which is what auth.json holds for the unused half of its fields.
+static bool json_string_field(const std::string& content, const std::string& key,
+                              std::string& value) {
+    const std::string needle = "\"" + key + "\"";
+    size_t pos = content.find(needle);
+    if (pos == std::string::npos) return false;
+    size_t colon = content.find_first_not_of(" \t\r\n", pos + needle.size());
+    if (colon == std::string::npos || content[colon] != ':') return false;
+    size_t start = content.find_first_not_of(" \t\r\n", colon + 1);
+    if (start == std::string::npos || content[start] != '"') return false;
+    std::string out;
+    for (size_t i = start + 1; i < content.size(); ++i) {
+        char c = content[i];
+        if (c == '"') {
+            value = out;
+            return true;
+        }
+        if (c != '\\') {
+            out += c;
+            continue;
+        }
+        if (++i >= content.size()) return false;
+        switch (content[i]) {
+            case 'n': out += '\n'; break;
+            case 't': out += '\t'; break;
+            case 'r': out += '\r'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case 'u': return false;  // no \u in credentials; refuse rather than mangle
+            default: out += content[i]; break;
+        }
+    }
+    return false;
+}
+
+// A credential is pasted by hand often enough that stray whitespace is normal;
+// CR/LF would let it split the upstream request head, so reject those outright.
+static bool usable_credential(const std::string& value, std::string& trimmed) {
+    size_t s0 = value.find_first_not_of(" \t\r\n");
+    size_t s1 = value.find_last_not_of(" \t\r\n");
+    if (s0 == std::string::npos) return false;
+    trimmed = value.substr(s0, s1 - s0 + 1);
+    return trimmed.find_first_of("\r\n") == std::string::npos;
+}
+
+static std::string bearer_header(const std::string& token) {
+    if (token.size() >= 7) {
+        std::string prefix = token.substr(0, 7);
+        for (auto& c : prefix) c = (char)std::tolower((unsigned char)c);
+        if (prefix == "bearer ") return token;
+    }
+    return "Bearer " + token;
+}
+
+static bool resolve_upstream_auth(const std::string& home, UpstreamAuth& out) {
+    out = UpstreamAuth{};
+
+    std::string content;
+    std::string provider;
+    if (read_file(fs::path(home) / "config.toml", content) &&
+        active_provider(content, provider)) {
+        std::string field;
+        std::string token;
+        if (provider_string_field(content, provider, "env_key", field) && !field.empty()) {
+            const char* env = std::getenv(field.c_str());
+            if (env && *env && usable_credential(env, token)) {
+                out.authorization = bearer_header(token);
+                out.source = "config.toml env_key(" + field + ")";
+                return true;
+            }
+        }
+        if (provider_string_field(content, provider, "experimental_bearer_token", field) &&
+            usable_credential(field, token)) {
+            out.authorization = bearer_header(token);
+            out.source = "config.toml experimental_bearer_token";
+            return true;
+        }
+        if (provider_string_field(content, provider, "api_key", field) &&
+            usable_credential(field, token)) {
+            out.authorization = bearer_header(token);
+            out.source = "config.toml api_key";
+            return true;
+        }
+    }
+
+    std::string auth_json;
+    if (read_file(fs::path(home) / "auth.json", auth_json)) {
+        std::string field;
+        std::string token;
+        if (json_string_field(auth_json, "OPENAI_API_KEY", field) &&
+            usable_credential(field, token)) {
+            out.authorization = bearer_header(token);
+            out.source = "auth.json OPENAI_API_KEY";
+            return true;
+        }
+        if (json_string_field(auth_json, "access_token", field) &&
+            usable_credential(field, token)) {
+            out.authorization = bearer_header(token);
+            out.source = "auth.json tokens.access_token";
+            // ChatGPT-scoped tokens are account-scoped; codex sent this header
+            // alongside them, so relays that check it keep working.
+            std::string account;
+            if (json_string_field(auth_json, "account_id", field) &&
+                usable_credential(field, account)) {
+                out.account_id = account;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool read_upstream_auth(const std::string& home, UpstreamAuth& out) {
+    static std::mutex cache_mutex;
+    static UpstreamAuth cached;
+    static bool cached_found = false;
+    static bool cached_valid = false;
+    static std::string cached_home;
+    static fs::file_time_type cached_cfg_mtime{};
+    static fs::file_time_type cached_auth_mtime{};
+
+    out = UpstreamAuth{};
+    if (home.empty()) return false;
+
+    // The proxy resolves this per request, so cache on mtime the way the
+    // rewriter config does: a `codex login` or a config edit takes effect
+    // without a restart, without re-reading two files on every turn.
+    std::error_code ec;
+    fs::file_time_type cfg_mtime = fs::last_write_time(fs::path(home) / "config.toml", ec);
+    if (ec) cfg_mtime = fs::file_time_type{};
+    std::error_code auth_ec;
+    fs::file_time_type auth_mtime = fs::last_write_time(fs::path(home) / "auth.json", auth_ec);
+    if (auth_ec) auth_mtime = fs::file_time_type{};
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    if (cached_valid && cached_home == home && cached_cfg_mtime == cfg_mtime &&
+        cached_auth_mtime == auth_mtime) {
+        out = cached;
+        return cached_found;
+    }
+
+    cached_found = resolve_upstream_auth(home, cached);
+    cached_home = home;
+    cached_cfg_mtime = cfg_mtime;
+    cached_auth_mtime = auth_mtime;
+    cached_valid = true;
+    out = cached;
+    return cached_found;
 }
 
 bool verify_injection(const std::string& home) {

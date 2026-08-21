@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated_at": "2026-08-13",
+  "version": 2,
+  "updated_at": "2026-08-21",
   "items": [
     {
       "question": "出现 no helmx.config.json 怎么办？",
@@ -21,6 +21,10 @@
     {
       "question": "为什么日志一直刷 /api/zxwn？",
       "answer": "这是旧版页面轮询产生的请求日志。最新版已对轮询接口降噪；关闭旧进程后再运行新版。"
+    },
+    {
+      "question": "升级 codex 0.149.0 后一直报 401 Missing API key 怎么办？",
+      "answer": "codex 0.149.0 起不再把 auth.json 的凭据传给自定义 provider，请求到代理时没有 Authorization 头，上游返回 401。最新版 helm-x 会自动从 codex 配置解析凭据并补上：优先读 [model_providers.custom] 的 env_key/experimental_bearer_token/api_key，再读 auth.json 的 OPENAI_API_KEY 或 ChatGPT 登录 token。确认其中之一可用即可，运行 helmx verify 可查看凭据来源。"
     }
   ]
 }

@@ -42,6 +42,15 @@ void check(bool ok, const char* name, const char* detail, std::string& report) {
     if (!ok) g_failures++;
 }
 
+// Report a condition helm-x does not own — the user's relay credentials live in
+// their own config, and codex may hold one this process cannot see (an env_key
+// exported only in the shell codex runs from). Surface it; never fail on it.
+void warn(bool ok, const char* name, const char* detail, std::string& report) {
+    char line[1024];
+    std::snprintf(line, sizeof(line), "  [%s] %s %s\n", ok ? "PASS" : "WARN", name, detail);
+    report += line;
+}
+
 std::string read_file_str(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) return "";
@@ -246,6 +255,16 @@ int run_verify(bool e2e, std::string& report) {
 
     // 5. backup exists
     check(fs::exists(cfg.string() + ".helmx-bak"), "config backup (.helmx-bak)", "", report);
+
+    // 6. upstream credential — codex >= 0.149.0 no longer forwards auth.json to
+    //    custom providers, so the proxy has to attach it. Without a resolvable
+    //    credential every request comes back 401 "Missing API key".
+    UpstreamAuth upstream_auth;
+    bool has_auth = read_upstream_auth(home, upstream_auth);
+    warn(has_auth, "upstream credential",
+         has_auth ? upstream_auth.source.c_str()
+                  : "none found — set api_key in [model_providers.*] or run codex login",
+         report);
 
     // 8. e2e
     if (e2e) {

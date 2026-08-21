@@ -31,6 +31,7 @@
 #include <atomic>
 #include <cctype>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -586,17 +587,56 @@ std::string inject_request(const std::string& body, const std::string& agents, b
     return out;
 }
 
+// ── upstream credential fallback ──
+// codex 0.149.0 no longer lets a custom model provider inherit the auth.json
+// credential, so requests arrive here with no Authorization header and the
+// relay answers 401 {"error":"Missing API key"}. Resolve the same credential
+// from codex's own configuration and attach it when the client sent none.
+// Returns the account id to send alongside an account-scoped token.
+std::string fill_missing_auth(std::string& auth) {
+    if (!auth.empty()) return "";
+
+    UpstreamAuth fallback;
+    bool found = read_upstream_auth(find_codex_home(), fallback);
+
+    // Log the source once per change: the state is worth knowing, but this runs
+    // on every request and every retry.
+    static std::mutex log_mutex;
+    static std::string logged;
+    {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        std::string current = found ? fallback.source : "(none)";
+        if (logged != current) {
+            logged = current;
+            if (found) {
+                log_info("proxy: codex sent no Authorization — attaching credential from " +
+                         fallback.source + " (codex >= 0.149 stops forwarding it)");
+            } else {
+                log_error("proxy: codex sent no Authorization and no credential was found — "
+                          "set api_key in [model_providers.*] of config.toml, or run codex login");
+            }
+        }
+    }
+
+    if (!found) return "";
+    auth = fallback.authorization;
+    return fallback.account_id;
+}
+
 // ── WinHTTP upstream call ──
 // Returns HTTP status and response body.
 using ForwardHeader = std::pair<std::string, std::string>;
 
 bool upstream_post(const std::string& path, const std::string& body,
-                   const std::string& auth, const std::vector<ForwardHeader>& forwarded,
+                   const std::string& client_auth, const std::vector<ForwardHeader>& forwarded,
                    int& status, std::string& resp) {
     std::string host;
     int port = 443;
     std::string prefix;
     split_upstream(g_upstream, host, port, prefix);
+
+    std::string auth = client_auth;
+    const std::string account_id = fill_missing_auth(auth);
 
     // path from codex is like "/v1/responses"; prefix is "/v1".
     // Upstream base includes /v1; keep full path as-is (codex paths start /v1).
@@ -616,11 +656,13 @@ bool upstream_post(const std::string& path, const std::string& body,
     r.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0";
     r.headers.push_back({"Content-Type", "application/json"});
     if (!auth.empty()) r.headers.push_back({"Authorization", auth});
+    if (!account_id.empty()) r.headers.push_back({"ChatGPT-Account-ID", account_id});
     return http_post(r, status, resp);
 #else
     std::wstring whost(host.begin(), host.end());
     std::wstring wpath(path.begin(), path.end());
     std::wstring wauth(auth.begin(), auth.end());
+    std::wstring waccount(account_id.begin(), account_id.end());
 
     HINTERNET hSession = WinHttpOpen(L"helmx-proxy/" HELMX_VERSION_W,
                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -650,6 +692,11 @@ bool upstream_post(const std::string& path, const std::string& body,
     if (!auth.empty()) {
         hdrs += L"Authorization: ";
         hdrs += wauth;
+        hdrs += L"\r\n";
+    }
+    if (!account_id.empty()) {
+        hdrs += L"ChatGPT-Account-ID: ";
+        hdrs += waccount;
         hdrs += L"\r\n";
     }
     log_info(std::string("upstream: ") + host + ":" + std::to_string(port) + path +
