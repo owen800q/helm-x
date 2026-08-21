@@ -12,3 +12,4 @@ assets/rewriter_builtin.json
 __pycache__/
 *.pyc
 helmx.log
+helmx-cyber.log

@@ -36,6 +36,19 @@ std::string read_relay_url(const std::string& home);
 bool read_active_provider(const std::string& home, std::string& provider,
                           std::string& base_url);
 
+// Credential for the relay, resolved from codex's own configuration.
+struct UpstreamAuth {
+    std::string authorization;  // ready-to-send header value ("Bearer sk-...")
+    std::string account_id;     // ChatGPT-Account-ID, when the token is account-scoped
+    std::string source;         // where it came from — safe to log, never the token
+};
+
+// Resolve the credential codex itself used to send before 0.149.0 stopped
+// forwarding auth.json to custom providers. Looks at the active provider's
+// env_key / experimental_bearer_token / api_key, then auth.json. Cached on
+// file mtime, so `codex login` and config edits apply without a restart.
+bool read_upstream_auth(const std::string& home, UpstreamAuth& out);
+
 // Verify injected settings are still present
 bool verify_injection(const std::string& home);
 

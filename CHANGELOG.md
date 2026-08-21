@@ -1,5 +1,19 @@
 # 更新日志
 
+## Unreleased
+
+### 修复 codex 0.149.0 起上游 401 Missing API key
+
+- codex 0.149.0 起，自定义 model provider 不再继承 `auth.json` 的凭据：请求到达
+  代理时不带 `Authorization` 头，上游中转返回 `401 {"error":"Missing API key"}`。
+- 代理在客户端未带 `Authorization` 时，自动从 codex 自身配置解析同一份凭据并补上，
+  顺序为：活动 provider 的 `env_key`（环境变量）→ `experimental_bearer_token`
+  → `api_key` → `auth.json` 的 `OPENAI_API_KEY` → `auth.json` 的
+  `tokens.access_token`（并透传 `ChatGPT-Account-ID`）。
+- 客户端已带 `Authorization` 时保持原样，不覆盖；凭据按文件 mtime 缓存，`codex login`
+  或改配置后无需重启即可生效；日志只记录来源，不打印 token。
+- `helmx verify` 新增上游凭据检查（WARN 级，不判失败）。
+
 ## v0.0.8 (2026-08-14)
 
 - 新增 `deepseek` 提示词模式：内置 CTF 计分制优化提示词（输出锁定 + 归一化 + 防御替代计为拒绝）

@@ -30,6 +30,15 @@ A: 可选。在 `%APPDATA%\helmx.config.json` 中配置改写器 API（如 NVIDI
 ### Q: 代理端口怎么改？
 A: `helmx proxy --listen 8080`。默认 1800。
 
+### Q: 升级 codex 到 0.149.0 后一直报 `401 Missing API key`？
+A: codex 0.149.0 起不再把 `auth.json` 的凭据传给自定义 provider，请求到代理时没有
+`Authorization` 头，上游因此返回 401。最新版 helm-x 会自动从 codex 配置里解析凭据
+并补上，无需改动。请确认凭据可被解析到其中之一：`[model_providers.custom]` 的
+`api_key` / `env_key`（对应环境变量已导出）/ `experimental_bearer_token`，或
+`auth.json` 里的 `OPENAI_API_KEY`（`codex login --with-api-key`）/ ChatGPT 登录
+token。运行 `helmx verify` 可查看解析到的凭据来源。注意：若 `env_key` 指向的环境变量
+只在启动 codex 的终端里导出，请在同一环境启动 helm-x，或改用 `api_key`。
+
 ### Q: cyber flag 是什么？
 A: OpenAI 的网络安全策略检测。当请求包含特定意图词组合（如"隐藏进程"+"任务管理器"）时触发。AGENTS 注入可以阻止大部分触发。
 
