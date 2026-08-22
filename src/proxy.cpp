@@ -43,6 +43,8 @@
 #include <winhttp.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")
+#else
+#include <sys/utsname.h>
 #endif
 
 namespace helmx {
@@ -627,6 +629,29 @@ std::string fill_missing_auth(std::string& auth) {
 // Returns HTTP status and response body.
 using ForwardHeader = std::pair<std::string, std::string>;
 
+// A header value carrying CR/LF would let a client inject extra upstream
+// headers, so such values are dropped rather than forwarded.
+bool header_value_safe(const std::string& v) {
+    return v.find('\r') == std::string::npos && v.find('\n') == std::string::npos;
+}
+
+#ifndef _WIN32
+// Fallback identity for a client that sent no User-Agent. Mirrors the shape
+// codex itself sends, with this host's OS/arch instead of the Windows one.
+std::string default_codex_user_agent() {
+    std::string os = "Unknown", arch = "x86_64";
+    struct utsname u {};
+    if (::uname(&u) == 0) {
+        os = u.sysname;
+        arch = u.machine;
+        if (os == "Darwin") os = "Mac OS X";
+    }
+    const char* term = std::getenv("TERM");
+    std::string t = (term && *term) ? term : "xterm-256color";
+    return "codex_exec/0.146.0 (" + os + "; " + arch + ") " + t + " (codex_exec; 0.146.0)";
+}
+#endif
+
 bool upstream_post(const std::string& path, const std::string& body,
                    const std::string& client_auth, const std::vector<ForwardHeader>& forwarded,
                    int& status, std::string& resp) {
@@ -653,10 +678,22 @@ bool upstream_post(const std::string& path, const std::string& body,
     r.body = body;
     r.timeout_sec = upstream_timeout_sec();
     r.idle_timeout_sec = upstream_idle_sec();
-    r.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0";
     r.headers.push_back({"Content-Type", "application/json"});
     if (!auth.empty()) r.headers.push_back({"Authorization", auth});
     if (!account_id.empty()) r.headers.push_back({"ChatGPT-Account-ID", account_id});
+    // Codex identity headers (session/thread/installation ids, User-Agent,
+    // Originator) must reach the upstream relay — it correlates turns by
+    // them. Same set the Windows branch below forwards.
+    bool has_user_agent = false, has_originator = false;
+    for (const auto& header : forwarded) {
+        if (!header_value_safe(header.second)) continue;
+        r.headers.push_back(header);
+        has_user_agent = has_user_agent || header.first == "User-Agent";
+        has_originator = has_originator || header.first == "Originator";
+    }
+    // A User-Agent header set here wins over req.user_agent in the client.
+    if (!has_user_agent) r.user_agent = default_codex_user_agent();
+    if (!has_originator) r.headers.push_back({"Originator", "codex_exec"});
     return http_post(r, status, resp);
 #else
     std::wstring whost(host.begin(), host.end());
@@ -704,7 +741,7 @@ bool upstream_post(const std::string& path, const std::string& body,
              " body=" + std::to_string(body.size()) + "B");
     bool has_user_agent = false, has_originator = false;
     for (const auto& header : forwarded) {
-        if (header.second.find('\r') != std::string::npos || header.second.find('\n') != std::string::npos) continue;
+        if (!header_value_safe(header.second)) continue;
         std::wstring name(header.first.begin(), header.first.end());
         std::wstring value(header.second.begin(), header.second.end());
         hdrs += name + L": " + value + L"\r\n";
