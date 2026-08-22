@@ -1,6 +1,17 @@
 # 更新日志
 
-## Unreleased
+## v0.0.9 (2026-08-22)
+
+### 修复 macOS/Linux 上游丢失 codex 身份请求头
+
+- POSIX 分支的 `upstream_post` 完全忽略需要透传的 codex 身份请求头，并写死了一个
+  Chrome User-Agent：macOS/Linux 上 `session-id`、`session_id`、`thread-id`、
+  `x-client-request-id`、`x-codex-installation-id`、`x-codex-window-id`、
+  `x-codex-turn-metadata`、`User-Agent`、`Originator` 都到不了上游中转，
+  只有 Windows（WinHTTP）分支在透传。
+- POSIX 分支改为按平台层转发同一组请求头；客户端未带 `User-Agent` 时回落到
+  按本机 OS/架构生成的 codex 风格 UA，未带 `Originator` 时回落到 `codex_exec`。
+- 带 CR/LF 的请求头值一律丢弃（两个平台共用同一校验），防止请求头注入。
 
 ### 修复 codex 0.149.0 起上游 401 Missing API key
 
