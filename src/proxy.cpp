@@ -627,6 +627,12 @@ std::string fill_missing_auth(std::string& auth) {
 // Returns HTTP status and response body.
 using ForwardHeader = std::pair<std::string, std::string>;
 
+// Used when the client sent no User-Agent / Originator of its own. Shared by
+// both platform branches so the two cannot drift apart.
+constexpr const char* kDefaultUpstreamUserAgent =
+    "codex_exec/0.146.0 (Windows 10.0.26100; x86_64) xterm-256color (codex_exec; 0.146.0)";
+constexpr const char* kDefaultUpstreamOriginator = "codex_exec";
+
 bool upstream_post(const std::string& path, const std::string& body,
                    const std::string& client_auth, const std::vector<ForwardHeader>& forwarded,
                    int& status, std::string& resp) {
@@ -653,10 +659,25 @@ bool upstream_post(const std::string& path, const std::string& body,
     r.body = body;
     r.timeout_sec = upstream_timeout_sec();
     r.idle_timeout_sec = upstream_idle_sec();
-    r.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0";
     r.headers.push_back({"Content-Type", "application/json"});
     if (!auth.empty()) r.headers.push_back({"Authorization", auth});
     if (!account_id.empty()) r.headers.push_back({"ChatGPT-Account-ID", account_id});
+    // Pass codex's session/thread/installation identity through, exactly as the
+    // Windows branch below does — the upstream ties a conversation together by
+    // these headers, and dropping them made every request look like a new one.
+    bool has_user_agent = false, has_originator = false;
+    for (const auto& header : forwarded) {
+        if (header.second.find('\r') != std::string::npos || header.second.find('\n') != std::string::npos) continue;
+        if (header.first == "User-Agent") {
+            r.user_agent = header.second;
+            has_user_agent = true;
+            continue;
+        }
+        has_originator = has_originator || header.first == "Originator";
+        r.headers.push_back({header.first, header.second});
+    }
+    if (!has_user_agent) r.user_agent = kDefaultUpstreamUserAgent;
+    if (!has_originator) r.headers.push_back({"Originator", kDefaultUpstreamOriginator});
     return http_post(r, status, resp);
 #else
     std::wstring whost(host.begin(), host.end());
@@ -711,9 +732,14 @@ bool upstream_post(const std::string& path, const std::string& body,
         has_user_agent = has_user_agent || header.first == "User-Agent";
         has_originator = has_originator || header.first == "Originator";
     }
-    if (!has_user_agent)
-        hdrs += L"User-Agent: codex_exec/0.146.0 (Windows 10.0.26100; x86_64) xterm-256color (codex_exec; 0.146.0)\r\n";
-    if (!has_originator) hdrs += L"Originator: codex_exec\r\n";
+    if (!has_user_agent) {
+        std::string ua = kDefaultUpstreamUserAgent;
+        hdrs += L"User-Agent: " + std::wstring(ua.begin(), ua.end()) + L"\r\n";
+    }
+    if (!has_originator) {
+        std::string orig = kDefaultUpstreamOriginator;
+        hdrs += L"Originator: " + std::wstring(orig.begin(), orig.end()) + L"\r\n";
+    }
 
     BOOL ok = WinHttpSendRequest(hRequest, hdrs.c_str(), (DWORD)hdrs.size(),
                                  (LPVOID)body.data(), (DWORD)body.size(),
