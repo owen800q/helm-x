@@ -1,6 +1,6 @@
 # 更新日志
 
-## Unreleased
+## v0.0.9 (2026-08-24)
 
 ### 修复 codex 0.149.0 起上游 401 Missing API key
 
@@ -13,6 +13,10 @@
 - 客户端已带 `Authorization` 时保持原样，不覆盖；凭据按文件 mtime 缓存，`codex login`
   或改配置后无需重启即可生效；日志只记录来源，不打印 token。
 - `helmx verify` 新增上游凭据检查（WARN 级，不判失败）。
+
+### 其他
+
+- 文档：README 联系方式由 QQ 群改为 Telegram（同步自上游）。
 
 ## v0.0.8 (2026-08-14)
 
