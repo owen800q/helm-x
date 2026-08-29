@@ -1,9 +1,16 @@
 # 更新日志
 
-## Unreleased
+## v0.0.10 (2026-08-29)
+
+### 上游请求重试（同步自上游）
 
 - 上游 proxy 重试默认调整为额外 10 次、固定间隔 3 秒
 - 新增 WebUI、配置文件和 CLI 的固定重试间隔设置
+
+### 其他
+
+- macOS/Linux：代理转发 codex 身份头（`session-id`、`thread-id`、
+  `x-codex-*`、`User-Agent`、`Originator`），与 Windows 路径行为一致
 
 ## v0.0.9 (2026-08-24)
 
