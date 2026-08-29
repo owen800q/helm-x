@@ -39,6 +39,9 @@ A: codex 0.149.0 起不再把 `auth.json` 的凭据传给自定义 provider，�
 token。运行 `helmx verify` 可查看解析到的凭据来源。注意：若 `env_key` 指向的环境变量
 只在启动 codex 的终端里导出，请在同一环境启动 helm-x，或改用 `api_key`。
 
+### Q: 上游中转偶发错误会不会让请求直接停下？
+A: 默认不会。proxy 会对连接失败、空响应及所有 HTTP 4xx/5xx 额外重试 10 次（最多总计 11 次请求），每次固定等待 3 秒。Web 控制台 → 服务 → 上游请求重试可修改次数和间隔；`0` 表示无限重试。也可用 `helmx proxy --max-retries 0 --retry-delay 3` 只为当前进程启用无限重试，或用 `--no-retry` 临时关闭。固定间隔不采用上游 `Retry-After`。Ctrl+C 或关闭窗口会立即停止等待中的重试。
+
 ### Q: cyber flag 是什么？
 A: OpenAI 的网络安全策略检测。当请求包含特定意图词组合（如"隐藏进程"+"任务管理器"）时触发。AGENTS 注入可以阻止大部分触发。
 
