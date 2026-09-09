@@ -482,15 +482,16 @@ static HttpResponse api_prompt_mode_get(const HttpRequest&) {
     const std::string& mode = cfg.prompt_mode;
     std::string desc = (mode == "v45") ? "gpt-5.6-instruct (沙盒执行器)"
                      : (mode == "deepseek") ? "deepseek 优化版 (CTF 计分制)"
+                     : (mode == "gpt6") ? "gpt-6-instruct (gpt-6-astra 原子续作)"
                      : "helm-x (安全研究竞赛)";
     return HttpResponse::json("{\"mode\":\"" + mode + "\",\"desc\":\"" + desc + "\"}");
 }
 
 static HttpResponse api_prompt_mode(const HttpRequest& req) {
-    // Switch prompt mode: "default", "v45" or "deepseek"
+    // Switch prompt mode: "default", "v45", "deepseek" or "gpt6"
     std::string mode = req.body;
-    if (mode != "default" && mode != "v45" && mode != "deepseek") {
-        return HttpResponse::json("{\"error\":\"invalid mode, use 'default', 'v45' or 'deepseek'\"}");
+    if (mode != "default" && mode != "v45" && mode != "deepseek" && mode != "gpt6") {
+        return HttpResponse::json("{\"error\":\"invalid mode, use 'default', 'v45', 'deepseek' or 'gpt6'\"}");
     }
 
     RewriterConfig cfg;

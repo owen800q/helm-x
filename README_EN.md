@@ -169,6 +169,26 @@ The **Context** page configures Context Gardener, tool-output limits, and Codex
 auto-compaction settings. Maintainers can add questions by editing
 [`assets/qa.json`](assets/qa.json); see [`docs/QA.md`](docs/QA.md).
 
+### Switch Prompt Mode
+
+Web console → Prompt page → select a mode → restart proxy. Available modes:
+
+| Mode | Prompt | Notes |
+|------|--------|-------|
+| `default` | helm-x | Security-research competition framing + domain knowledge |
+| `v45` | gpt-5.6-instruct | Sandbox executor + tool-first + no refusals |
+| `deepseek` | deepseek optimized | CTF scoring + output lock + normalization |
+| `gpt6` | gpt-6-instruct (gpt-6-astra) | Atomic continuation dispatch + artifact verification + runnable rollback |
+
+The `gpt6` mode embeds the `gpt-6-astra-v1` prompt from
+[gpt-instruct](https://github.com/MDX-Tom/gpt-instruct) (byte-identical to
+e2b19), aimed at first-turn execution of complex tasks, process continuity, and
+artifact verification. It can also be switched from the CLI / config:
+
+```bash
+curl -X POST http://127.0.0.1:8090/api/prompt-mode -d gpt6
+```
+
 ### Verify
 
 ```bat

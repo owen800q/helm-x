@@ -24,6 +24,14 @@ class TestEmbed(unittest.TestCase):
             self.assertIsNotNone(match)
             self.assertGreater(int(match.group(1)), 0)
 
+    def test_gpt6_prompt_is_embedded(self):
+        prompt = (ROOT / "assets" / "prompt-gpt6-instruct.md").read_bytes().replace(b"\r\n", b"\n")
+        self.assertGreater(len(prompt), 0)
+        generated = (ROOT / "src" / "resources_generated.cpp").read_text(encoding="utf-8")
+        match = re.search(r"kAgentsGpt6CipherLen = (\d+)", generated)
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)), len(prompt))
+
     def test_qa_json_is_valid_and_embedded(self):
         qa = __import__("json").loads((ROOT / "assets" / "qa.json").read_text(encoding="utf-8"))
         self.assertTrue(qa["items"])

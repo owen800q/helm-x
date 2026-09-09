@@ -23,6 +23,11 @@ extern const size_t kAgentsDeepseekCipherLen;
 extern const unsigned char kAgentsDeepseekKey[];
 extern const size_t kAgentsDeepseekKeyLen;
 
+extern const unsigned char kAgentsGpt6Cipher[];
+extern const size_t kAgentsGpt6CipherLen;
+extern const unsigned char kAgentsGpt6Key[];
+extern const size_t kAgentsGpt6KeyLen;
+
 extern const unsigned char kTamperRulesCipher[];
 extern const size_t kTamperRulesCipherLen;
 extern const unsigned char kTamperRulesKey[];
@@ -79,6 +84,8 @@ std::string get_resource(ResId id) {
             return xor_decrypt(kAgentsV45Cipher, kAgentsV45CipherLen, kAgentsV45Key, kAgentsV45KeyLen);
         case ResId::AgentsDeepseek:
             return xor_decrypt(kAgentsDeepseekCipher, kAgentsDeepseekCipherLen, kAgentsDeepseekKey, kAgentsDeepseekKeyLen);
+        case ResId::AgentsGpt6:
+            return xor_decrypt(kAgentsGpt6Cipher, kAgentsGpt6CipherLen, kAgentsGpt6Key, kAgentsGpt6KeyLen);
         case ResId::TamperRules:
             return xor_decrypt(kTamperRulesCipher, kTamperRulesCipherLen, kTamperRulesKey, kTamperRulesKeyLen);
         case ResId::DashboardHtml:
