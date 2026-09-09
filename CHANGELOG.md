@@ -1,5 +1,17 @@
 # 更新日志
 
+## v0.0.11 (2026-09-09)
+
+### 新增 gpt-6-instruct 提示词模式
+
+- 新增 `gpt6` 提示词模式，内置 [gpt-instruct](https://github.com/MDX-Tom/gpt-instruct)
+  的 `gpt-6-astra-v1` 提示词（与 e2b19 字节一致，7495 字节），面向复杂任务的首轮
+  执行、过程连续性、工件验证和可运行回滚。
+- Web 控制台提示词页面新增 `gpt6` 选项；`POST /api/prompt-mode` 接受 `gpt6`。
+- 提示词模式现支持 `default` / `v45` / `deepseek` / `gpt6` 四种。
+- 资源层新增加密内嵌资源 `AgentsGpt6`，`tools/embed.py` 同步读取
+  `assets/prompt-gpt6-instruct.md`。
+
 ## v0.0.10 (2026-08-29)
 
 ### 上游请求重试（同步自上游）

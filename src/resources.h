@@ -10,6 +10,7 @@ enum class ResId {
     AgentsMd,       // AGENTS.md content
     AgentsV45,      // v45 prompt (gpt-5.6-instruct)
     AgentsDeepseek, // deepseek 优化版 prompt
+    AgentsGpt6,     // gpt-6-astra prompt (gpt-6-instruct)
     TamperRules,    // TAMPER_RULES pattern list
     DashboardHtml,  // embedded web dashboard
     QaJson,         // offline QA fallback

@@ -161,6 +161,23 @@ codex
 
 Web 控制台 → 提示词页面 → 选择模式 → 重启 proxy。
 
+可选模式：
+
+| 模式 | 提示词 | 说明 |
+|------|--------|------|
+| `default` | helm-x | 安全研究竞赛框架 + 领域知识 |
+| `v45` | gpt-5.6-instruct | 沙盒执行器 + 工具优先 + 无拒绝 |
+| `deepseek` | deepseek 优化版 | CTF 计分制 + 输出锁定 + 归一化 |
+| `gpt6` | gpt-6-instruct（gpt-6-astra） | 原子续作调度 + 工件验证 + 可运行回滚 |
+
+`gpt6` 模式内置 [gpt-instruct](https://github.com/MDX-Tom/gpt-instruct) 的
+`gpt-6-astra-v1` 提示词（与 e2b19 字节一致），面向复杂任务的首轮执行、过程连续性
+和工件验证。也可用 CLI / 配置文件切换：
+
+```bash
+curl -X POST http://127.0.0.1:8090/api/prompt-mode -d gpt6
+```
+
 ### 五、查看日志
 
 Web 控制台 → 运行日志 → Cyber 日志 + 代理日志。
@@ -243,6 +260,7 @@ assets/
   prompt-ctf-scoring.md       默认提示词（2.5KB，CTF 计分制）
   prompt-sandbox-executor.md  v45 提示词（沙盒执行器）
   prompt-deepseek优化版.md    deepseek 提示词（CTF 计分制 + 输出锁定）
+  prompt-gpt6-instruct.md     gpt6 提示词（gpt-6-astra 原子续作）
   tamper_rules.txt            28 条拒绝句式
   rewrite_prompt.txt          改写器系统提示词
   rewriter_builtin.json       内置改写 API 配置

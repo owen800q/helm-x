@@ -393,13 +393,15 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface) 60%, var(--bg)); 
                 <option value="default">default (helm-x)</option>
                 <option value="v45">v45 (gpt-5.6-instruct)</option>
                 <option value="deepseek">deepseek (优化版)</option>
+                <option value="gpt6">gpt6 (gpt-6-instruct)</option>
               </select>
               <span id="prompt-mode-status" style="font-size:12px;color:var(--muted)"></span>
             </div>
             <div style="margin-top:12px;color:var(--muted);font-size:12px">
               <b>default</b>：helm-x 提示词（安全研究竞赛框架 + 领域知识）<br>
               <b>v45</b>：gpt-5.6-instruct 提示词（沙盒执行器 + 工具优先 + 无拒绝）<br>
-              <b>deepseek</b>：deepseek 优化版（CTF 计分制 + 输出锁定 + 归一化）
+              <b>deepseek</b>：deepseek 优化版（CTF 计分制 + 输出锁定 + 归一化）<br>
+              <b>gpt6</b>：gpt-6-instruct 提示词（gpt-6-astra 原子续作 + 工件验证 + 可运行回滚）
             </div>
           </div>
         </div>
