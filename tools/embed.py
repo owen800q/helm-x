@@ -82,6 +82,7 @@ def main():
     agents_deepseek = norm(agents_deepseek)
     rules = norm(rules)
     dashboard = norm(dashboard)
+    qa_json = norm(qa_json)
     rewrite_prompt = norm(rewrite_prompt)
     rewriter_builtin = norm(rewriter_builtin)
 
