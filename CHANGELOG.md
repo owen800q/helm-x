@@ -1,5 +1,21 @@
 # 更新日志
 
+## v0.0.12 (2026-09-25)
+
+### 修复代理误报 403 与流式响应（同步自上游）
+
+- 不再强制 `stream=false`：完整缓冲上游的 JSON 或已终止的 SSE 响应，并按响应
+  内容自动设置 `Content-Type`（SSE 回 `text/event-stream; charset=utf-8`，
+  JSON 回 `application/json`），不再沿用请求的 Content-Type。
+- 网络安全策略（cyber flag）判定收敛为仅在上游返回 4xx 时触发，成功响应中
+  引用到的策略措辞不再被误判，也不会再被改写成合成的 403。
+- 重试策略修正：除 408/429 外的 4xx 不再重试（重放同样的请求或被拒的凭据无法
+  变成成功）。
+- 干净会话（clean-session）与 TAMPER 重试仅在上游确为 2xx 且响应非空时才替换
+  原响应；失败时保留原响应并记录日志。
+- 新增 `--passthrough`：完全透传请求/响应，不做注入、上下文裁剪或改写。
+- 新增 `tests/test_proxy_upstream.py` 上游行为回归测试。
+
 ## v0.0.11 (2026-09-09)
 
 ### 新增 gpt-6-instruct 提示词模式
