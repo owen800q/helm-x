@@ -84,6 +84,7 @@ def main():
     agents_gpt6 = norm(agents_gpt6)
     rules = norm(rules)
     dashboard = norm(dashboard)
+    qa_json = norm(qa_json)
     rewrite_prompt = norm(rewrite_prompt)
     rewriter_builtin = norm(rewriter_builtin)
 

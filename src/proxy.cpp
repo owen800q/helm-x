@@ -2,10 +2,8 @@
 //
 // Design (fixes the Python original's bugs):
 //  1. Upstream via WinHTTP (system TLS, no external deps).
-//  2. Force stream=false on upstream requests — the Python original
-//     blocked forever on SSE streams (urlopen().read() waits for the
-//     stream to end). With stream=false we get one complete JSON body,
-//     tamper it, and reply. Reliable.
+//  2. Buffer complete JSON or terminated SSE upstream responses and preserve the
+//     appropriate response Content-Type.
 //  3. Inject embedded AGENTS into request instructions/system.
 //  4. TAMPER_RULES rewrite refusals with a compliance marker.
 //  5. Auto-config: point codex base_url at this proxy, back up original.
@@ -54,6 +52,7 @@ namespace {
 
 std::string g_upstream;  // e.g. https://huablog.xyz/v1
 int g_listen_port = 1800;
+bool g_passthrough = false; // no request/response content transforms
 std::atomic<bool> g_running{true};
 std::atomic<unsigned long long> g_upstream_request_sequence{0};
 
@@ -131,32 +130,6 @@ void split_upstream(const std::string& url, std::string& host, int& port, std::s
 }
 
 // ── JSON helpers (minimal, no external parser) ──
-// Replace a top-level "key": "value" (string value) with a new value.
-bool json_set_string(std::string& s, const std::string& key, const std::string& value) {
-    std::string needle = "\"" + key + "\":\"";
-    size_t p = s.find(needle);
-    if (p == std::string::npos) return false;
-    size_t vstart = p + needle.size();
-    // escape value for JSON
-    std::string esc;
-    for (char c : value) {
-        if (c == '"' || c == '\\') { esc.push_back('\\'); esc.push_back(c); }
-        else if (c == '\n') { esc += "\\n"; }
-        else if (c == '\r') { esc += "\\r"; }
-        else if (c == '\t') { esc += "\\t"; }
-        else esc.push_back(c);
-    }
-    // find closing quote of old value
-    size_t vend = vstart;
-    while (vend < s.size() && s[vend] != '"') {
-        if (s[vend] == '\\') vend++;
-        vend++;
-    }
-    if (vend >= s.size()) return false;
-    s.replace(vstart, vend - vstart, esc);
-    return true;
-}
-
 size_t json_string_end(const std::string& s, size_t quote) {
     if (quote >= s.size() || s[quote] != '"') return std::string::npos;
     bool escaped = false;
@@ -591,13 +564,6 @@ std::string inject_request(const std::string& body, const std::string& agents, b
         }
     }
 
-    // 2. Force stream=false (avoid SSE stall with upstream)
-    json_set_string(out, "stream", "false");
-    {
-        size_t p = out.find("\"stream\":\"false\"");
-        if (p != std::string::npos) out.replace(p, 16, "\"stream\":false");
-    }
-
     if (out_injected) *out_injected = injected;
     return out;
 }
@@ -661,6 +627,26 @@ bool parse_nonnegative_int(const std::string& value, int& out) {
 
 bool has_non_whitespace(const std::string& body) {
     return body.find_first_not_of(" \t\r\n") != std::string::npos;
+}
+
+// An SSE stream can start with a UTF-8 BOM or comment/heartbeat lines.
+bool is_sse_body(const std::string& body) {
+    size_t pos = body.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    while (pos < body.size()) {
+        size_t end = body.find('\n', pos);
+        if (end == std::string::npos) end = body.size();
+        size_t count = end - pos;
+        if (count > 0 && body[pos + count - 1] == '\r') --count;
+        if (count == 0 || body[pos] == ':') {
+            pos = end < body.size() ? end + 1 : end;
+            continue;
+        }
+        return body.compare(pos, 6, "event:") == 0 ||
+               body.compare(pos, 5, "data:") == 0 ||
+               body.compare(pos, 3, "id:") == 0 ||
+               body.compare(pos, 6, "retry:") == 0;
+    }
+    return false;
 }
 
 UpstreamAttempt upstream_post_once(const std::string& path, const std::string& body,
@@ -852,8 +838,17 @@ UpstreamAttempt upstream_post_once(const std::string& path, const std::string& b
 }
 
 bool should_retry(const UpstreamAttempt& attempt) {
-    return !attempt.response_complete || attempt.status < 200 || attempt.status >= 300 ||
+    if (!attempt.response_complete) return true;
+    // Replaying the same malformed request or rejected credentials cannot fix 4xx.
+    // 408 and 429 are transient and can still be retried.
+    if (attempt.status >= 400 && attempt.status < 500 &&
+        attempt.status != 408 && attempt.status != 429) return false;
+    return attempt.status < 200 || attempt.status >= 300 ||
            !has_non_whitespace(attempt.body);
+}
+
+bool successful_upstream_response(bool complete, int status, const std::string& body) {
+    return complete && status >= 200 && status < 300 && has_non_whitespace(body);
 }
 
 std::string retry_reason(const UpstreamAttempt& attempt) {
@@ -1018,7 +1013,9 @@ void handle_client(SOCKET client) {
     const std::string& prompt_mode = rcfg.prompt_mode;
 
     std::string agents;
-    if (prompt_mode == "v45") {
+    if (g_passthrough) {
+        log_info("proxy: passthrough mode (no content transforms)");
+    } else if (prompt_mode == "v45") {
         agents = get_resource(ResId::AgentsV45);
         log_info("proxy: using v45 prompt (gpt-5.6-instruct)");
     } else if (prompt_mode == "deepseek") {
@@ -1034,7 +1031,7 @@ void handle_client(SOCKET client) {
     bool injected = false;
     size_t pruned_count = 0;
     size_t removed_bytes = 0;
-    std::string guarded_body = rcfg.context_gardener_enabled
+    std::string guarded_body = !g_passthrough && rcfg.context_gardener_enabled
         ? prune_large_tool_outputs(body, (size_t)rcfg.context_gardener_threshold_bytes,
                                    &pruned_count, &removed_bytes)
         : body;
@@ -1042,7 +1039,7 @@ void handle_client(SOCKET client) {
         log_info("context-guard: pruned " + std::to_string(pruned_count) +
                  " tool output(s), removed " + std::to_string(removed_bytes) + "B");
     }
-    std::string out_body = inject_request(guarded_body, agents, &injected);
+    std::string out_body = g_passthrough ? body : inject_request(guarded_body, agents, &injected);
     log_info(std::string("proxy: ") + method + " " + target +
              (injected ? " [INJECT] " : " [no-inject] ") +
              std::to_string(body.size()) + "B -> " + std::to_string(out_body.size()) + "B");
@@ -1061,42 +1058,19 @@ void handle_client(SOCKET client) {
     }
 
     // ── cyber-flag detection: parse response body, not just string scan ──
-    // Forms to catch:
-    //   a) HTTP 403 with error JSON: {"error":{"message":"...cybersecurity policy..."}}
-    //   b) HTTP 200 with error field in body
-    //   c) HTTP 200 with output_text containing the flag text
-    auto is_cyber_flag = [](int st, const std::string& body) {
-        // 0) universal markers anywhere in body (SSE error events, JSON, text)
-        if (body.find("cyber_policy") != std::string::npos ||
-            body.find("flagged for possible cybersecurity") != std::string::npos ||
-            body.find("Trusted Access for Cyber") != std::string::npos ||
-            body.find("cybersecurity risk") != std::string::npos ||
-            body.find("网络安全策略") != std::string::npos) {
-            return true;
-        }
-        // 403 + blocked wording
-        if (st == 403 && (body.find("cyber") != std::string::npos ||
-                          body.find("blocked") != std::string::npos ||
-                          body.find("网络安全策略") != std::string::npos)) {
-            return true;
-        }
-        // error JSON with cyber wording
-        size_t err = body.find("\"error\"");
-        if (err != std::string::npos) {
-            size_t emsg = body.find("\"message\"", err);
-            size_t seg = emsg == std::string::npos ? err : emsg;
-            std::string window = body.substr(seg, std::min<size_t>(400, body.size() - seg));
-            if (window.find("cyber") != std::string::npos ||
-                window.find("flagged") != std::string::npos ||
-                window.find("网络安全") != std::string::npos ||
-                window.find("Trusted Access") != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
+    // A successful response may quote policy wording as ordinary output. Only
+    // classify an actual upstream HTTP error as a policy denial; do not turn a
+    // completed 200 JSON/SSE response into a synthetic 403.
+    auto is_cyber_flag = [](int st, const std::string& response) {
+        if (st < 400 || st >= 500) return false;
+        return response.find("cyber_policy") != std::string::npos ||
+               response.find("flagged for possible cybersecurity") != std::string::npos ||
+               response.find("Trusted Access for Cyber") != std::string::npos ||
+               response.find("cybersecurity risk") != std::string::npos ||
+               response.find("\u7f51\u7edc\u5b89\u5168\u7b56\u7565") != std::string::npos;
     };
     bool cyber_flagged = is_cyber_flag(status, resp_body);
-    if (cyber_flagged && rcfg.enabled) {
+    if (cyber_flagged && !g_passthrough && rcfg.enabled) {
         log_info("proxy: CYBER FLAG detected — session refresh + rewriting");
 
         // Build cyber context for logging
@@ -1156,7 +1130,8 @@ void handle_client(SOCKET client) {
                 log_info("proxy: clean-session upstream " + std::to_string(status2) +
                          " (" + std::to_string(resp2.size()) + "B)");
 
-                if (ok2 && !is_cyber_flag(status2, resp2)) {
+                if (successful_upstream_response(ok2, status2, resp2) &&
+                    !is_cyber_flag(status2, resp2)) {
                     ok = ok2;
                     status = status2;
                     resp_body = resp2;
@@ -1179,7 +1154,8 @@ void handle_client(SOCKET client) {
                 int status2 = 502;
                 std::string resp2;
                 bool ok2 = upstream_post(target, clean_body, auth, forwarded, retry_options, status2, resp2);
-                if (ok2 && !is_cyber_flag(status2, resp2)) {
+                if (successful_upstream_response(ok2, status2, resp2) &&
+                    !is_cyber_flag(status2, resp2)) {
                     ok = ok2;
                     status = status2;
                     resp_body = resp2;
@@ -1193,7 +1169,7 @@ void handle_client(SOCKET client) {
         }
         log_info("proxy: calling log_cyber with result=" + cctx.result);
         log_cyber(cctx);
-    } else if (cyber_flagged) {
+    } else if (cyber_flagged && !g_passthrough) {
         // Cyber detected but rewriter disabled — still fork session
         CyberContext cctx;
         cctx.upstream_status = status;
@@ -1209,13 +1185,16 @@ void handle_client(SOCKET client) {
             int status2 = 502;
             std::string resp2;
             bool ok2 = upstream_post(target, clean_body, auth, forwarded, retry_options, status2, resp2);
-            if (ok2 && !is_cyber_flag(status2, resp2)) {
+            if (successful_upstream_response(ok2, status2, resp2) &&
+                !is_cyber_flag(status2, resp2)) {
                 ok = ok2;
                 status = status2;
                 resp_body = resp2;
                 cctx.result = "fork_pass";
                 cctx.upstream_status = status2;
             } else {
+                log_error("proxy: clean-session request failed: HTTP " + std::to_string(status2) +
+                          " (" + std::to_string(resp2.size()) + "B); retaining original response");
                 cctx.result = "fork_fail";
                 cctx.upstream_status = status2;
             }
@@ -1225,14 +1204,12 @@ void handle_client(SOCKET client) {
         log_cyber(cctx);
     }
 
-    // A retry can replace the original flagged response with a clean one.
+    // Do not overwrite the upstream status/message. A real upstream policy
+    // denial remains a denial; a completed response remains a success.
     cyber_flagged = is_cyber_flag(status, resp_body);
-    if (cyber_flagged) {
-        status = 403;
-        resp_body = "{\"error\":{\"message\":\"Upstream flagged this request for possible cybersecurity risk.\","
-                    "\"type\":\"cyber_policy_error\",\"code\":\"cyber_policy\"}}";
-        log_info("proxy: CYBER confirmed - returning structured cyber_policy error");
-    }
+    if (cyber_flagged)
+        log_info("proxy: upstream policy response HTTP " + std::to_string(status) +
+                 " (forwarding original response)");
 
     // TAMPER: rewrite refusals in the response body.
     // Supports both JSON responses (output_text/text fields) and SSE streams.
@@ -1252,7 +1229,8 @@ void handle_client(SOCKET client) {
         log_error("proxy: normalized invalid upstream response as JSON error");
     }
     bool tampered = false;
-    if (ok && !final_body.empty() && !cyber_flagged) {
+    if (!g_passthrough && successful_upstream_response(ok, status, final_body) &&
+        !cyber_flagged) {
         // Try JSON field extraction first
         size_t ot = final_body.find("\"output_text\":\"");
         size_t key_len = 15;
@@ -1337,7 +1315,8 @@ void handle_client(SOCKET client) {
                     int status_retry = 502;
                     std::string resp_retry;
                     bool ok_retry = upstream_post(target, retry_body, auth, forwarded, retry_options, status_retry, resp_retry);
-                    if (ok_retry && !is_refusal(resp_retry) && !is_cyber_flag(status_retry, resp_retry)) {
+                    if (successful_upstream_response(ok_retry, status_retry, resp_retry) &&
+                        !is_refusal(resp_retry) && !is_cyber_flag(status_retry, resp_retry)) {
                         log_info("proxy: TAMPER retry succeeded");
                         final_body = resp_retry;
                         tampered = false;
@@ -1359,6 +1338,16 @@ void handle_client(SOCKET client) {
             }
         }
         if (tampered) log_info("proxy: TAMPERED refusal");
+    }
+
+    // The request's Content-Type describes the payload sent *to* the proxy.
+    // It is not the type of the upstream response (particularly for SSE).
+    size_t response_start = final_body.find_first_not_of(" \t\r\n");
+    if (is_sse_body(final_body)) {
+        content_type = "text/event-stream; charset=utf-8";
+    } else if (response_start != std::string::npos &&
+               (final_body[response_start] == '{' || final_body[response_start] == '[')) {
+        content_type = "application/json";
     }
 
     std::string resp_head =
@@ -1383,16 +1372,18 @@ void handle_client(SOCKET client) {
 
 void proxy_usage() {
     std::printf(
-        "usage: helmx proxy [--listen PORT] [--upstream URL] [--max-retries N | --no-retry] [--retry-delay SECONDS]\n"
+        "usage: helmx proxy [--listen PORT] [--upstream URL] [--max-retries N | --no-retry] [--retry-delay SECONDS] [--passthrough]\n"
         "  --max-retries N       Retry failed upstream requests N additional times (0 = unlimited)\n"
         "  --retry-delay SECONDS Use a fixed delay between retries\n"
-        "  --no-retry            Disable upstream retry for this proxy process\n");
+        "  --no-retry            Disable upstream retry for this proxy process\n"
+        "  --passthrough         Forward request/response content without injection or rewriting\n");
 }
 
 }  // namespace
 
 int proxy_main(int argc, char** argv) {
     g_running = true;
+    g_passthrough = false;
     g_retry_cli_enabled_set = false;
     g_retry_cli_max_set = false;
     g_retry_cli_delay_set = false;
@@ -1441,6 +1432,8 @@ int proxy_main(int argc, char** argv) {
             }
             g_retry_cli_delay_set = true;
             g_retry_cli_options.delay_seconds = delay_seconds;
+        } else if (a == "--passthrough") {
+            g_passthrough = true;
         } else if (a == "--no-retry") {
             saw_no_retry = true;
             g_retry_cli_enabled_set = true;

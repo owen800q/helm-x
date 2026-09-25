@@ -7,6 +7,7 @@
 
 | 模块 | 测试文件 | 覆盖内容 |
 |---|---|---|
+| proxy | `test_proxy_upstream.py` | Local mock upstream: HTTP 400 is not retried; failed fallback is not reported as a pass; SSE Content-Type and policy error forwarding; passthrough mode (requires Windows build) |
 | config | `test_config.py` | apply/remove/restore、TOML 合并注入、CRLF 保留、备份回滚 |
 | inject | `test_inject.py` | inject_request（Responses API input[] 格式、chat messages 格式）、AGENTS 注入后字节匹配 |
 | tamper | `test_tamper.py` | TAMPER 规则加载、拒绝词检测、替换后文本完整性 |

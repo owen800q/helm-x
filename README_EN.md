@@ -148,13 +148,22 @@ helmx proxy --max-retries 0         :: Retry upstream failures forever
 helmx proxy --max-retries 2         :: Two retries after the initial request
 helmx proxy --retry-delay 3         :: Use a fixed three-second delay
 helmx proxy --no-retry              :: Disable retry for this process
+helmx proxy --passthrough           :: Disable request injection and response rewriting
 helmx ui                            :: Web console
 ```
 
+### Upstream Policy Errors
+
+The proxy preserves the upstream status and JSON error message instead of replacing it with a
+synthetic 403. For authorized requests that fail unexpectedly, run `helmx proxy --passthrough`
+to diagnose whether local request/response modifications contributed to the failure. This
+option does not override an upstream policy denial.
+
 ### Upstream Retry
 
-The proxy retries upstream transport failures, incomplete or empty responses, and every
-HTTP 4xx/5xx response by default. `upstream_max_retries` counts **additional** attempts:
+The proxy retries upstream transport failures, incomplete or empty responses, HTTP 408/429,
+and 5xx responses by default. Other 4xx errors (including 400 and 403) are not retried.
+`upstream_max_retries` counts **additional** attempts:
 the default `10` permits up to eleven requests total, while `0` retries until the proxy is
 stopped. Retries use a fixed three-second delay by default; configure the delay in
 **Services → Upstream Retry** or in `%APPDATA%\helmx.config.json`. The proxy does not
